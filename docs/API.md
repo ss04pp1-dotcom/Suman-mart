@@ -106,13 +106,16 @@ Auth via `sn_admin` cookie. Each route requires a permission (see `lib/permissio
 - Analytics → first-party events collected
 - Marketing → third-party pixels load and receive browser copies; server events forward to Meta CAPI / GA4 MP / TikTok Events API only with marketing consent
 
-## Workers API v1 (`apps/api` — Cloudflare, api.example.com)
+## Direct API access (`/v1/*` — Cloudflare Workers, api.example.com)
 
-Public read surface served from Cloudflare Workers + D1 + R2. Same response
-envelope as the Node API. All responses carry `X-API-Version: v1`, baseline
-security headers, and `Cache-Control: no-store` (media excepted). Cross-origin
-browser use is governed by `ALLOWED_ORIGINS` (preflight `OPTIONS` answered on
-every route).
+The Workers API serves EVERYTHING — the public surface below, all customer
+and admin endpoints from the sections above (same paths under `/v1`), the
+RSC data bundles, R2 media, and the hourly scheduled jobs. All responses
+carry `X-API-Version: v1`, baseline security headers, and
+`Cache-Control: no-store` (media excepted). Cross-origin browser use is
+governed by `ALLOWED_ORIGINS` (fail-closed default; preflight `OPTIONS`
+answered on every route) — the storefront/admin proxies need no entry
+because they call same-origin.
 
 ### GET /health
 `200 {status:"ok", checks:{database:"ok"}, environment, time}` — `503 degraded`

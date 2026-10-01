@@ -1,9 +1,9 @@
 # ShopNest / Suman Mart — Feature Inventory & Migration Tracker
 
-> Phase-1 audit deliverable. Every feature below is **verified working** on the production
-> build unless marked otherwise. This file is also the living migration tracker for the
-> move to the target architecture (storefront / Workers API / admin as independently
-> deployable apps on D1 + R2).
+> Phase-1 audit deliverable, kept current through the completed Cloudflare migration.
+> Every feature below is **verified working** on the production build unless marked
+> otherwise. The migration to the target architecture (storefront / Workers API /
+> admin as independently deployable apps on D1 + R2) is **COMPLETE** — see §8.
 
 Status legend: ✅ working & verified · 🔶 working with documented limitation · ⏳ migration
 pending (target architecture) · 🚫 externally blocked (credentials/docs needed)
@@ -63,7 +63,7 @@ production build green (`ignoreBuildErrors: false`).
 - **Tracking**: session (HMAC), events (ingestion, dedup, quotas), consent
 - **Admin**: dashboard, products (+bulk, [id]), categories, orders (+[id]), customers (+[id]), coupons, banners, reviews, suppliers (+[id]/sync/import/orders), analytics (overview/funnel/campaigns/products/events/events[id]/searches/abandoned/live/consent), reports/export, settings (+test-integration), team, upload, maintenance, notifications
 
-## 5. Integrations
+## 5. Integrations (all server-side logic lives in apps/api)
 
 | Integration | Status | Notes |
 |---|---|---|
@@ -74,23 +74,27 @@ production build green (`ignoreBuildErrors: false`).
 | bKash / Nagad | ✅ manual verification flow | merchant number from settings; automated gateway needs merchant API creds (🚫) |
 | Card payments | ✅ hard-disabled by design |  |
 | Supplier dropshipping | 🔶 demo adapter only | real adapter blocked on supplier API docs/credentials (🚫); interface + sync engine + import + orders + retries all real |
-| Storage | 🔶 local `upload/` via R2-ready abstraction | R2 binding implemented in apps/api this phase; Next.js uploads flip to R2 in a later phase |
+| Storage | ✅ R2-backed (read + write) | `/v1/media/*` serves the bucket; `/v1/admin/upload` writes it (magic-byte validation; SVG banned; no sharp re-encode on Workers — documented) |
 
-## 6. Security (verified by tests/E2E across rounds 1–5)
+## 6. Security (verified by tests/E2E across rounds 1–5 + the D1 port)
 
 PBKDF2 600k + transparent legacy upgrade · JWT (Web Crypto, edge-safe) w/ tokenVersion
-revocation · RBAC (5 roles + per-admin overrides, server-enforced) · rate limiting on
-separate SQLite DB w/ in-memory fail-degraded fallback · nonce CSP (no unsafe-inline/eval)
-· SSRF guard on outbound fetches · upload magic-byte + re-encode · CSV injection
-neutralization · HMAC tracking sessions + (eventId,source) dedup + quotas · zod validation
-everywhere · audit logs · non-atomic → atomic fixes for stock/coupon/order-number/TrxID/
-OTP-attempts · 16-way race tests prove no oversell.
+revocation · RBAC (5 roles + per-admin overrides, server-enforced) · **rate limiting on
+D1 (shared across every Worker instance) w/ in-memory fail-degraded fallback** · nonce
+CSP (no unsafe-inline/eval) · SSRF guard on outbound fetches · upload magic-byte
+validation (SVG banned) · CSV injection neutralization · HMAC tracking sessions +
+(eventId,source) dedup + quotas · zod validation everywhere · audit logs · non-atomic →
+atomic fixes for stock/coupon/order-number/TrxID/OTP-attempts — re-proven on D1:
+8-way parallel race → exactly-5-sold, cancel → exactly-once restore.
 
-## 7. Known limitations (documented, unchanged)
+## 7. Known limitations (updated for the target architecture)
 
-Single-instance SQLite + file rate-limit DB (multi-node needs Postgres/Redis) · all
-storefront pages force-dynamic (nonce CSP trade-off) · fixed-window rate limits allow ~2×
-boundary burst · supplier demo adapter · guest coupon limit rotatable by email/phone change.
+All storefront pages force-dynamic (nonce CSP trade-off) · fixed-window rate limits allow
+~2× boundary burst · supplier demo adapter (engine real, adapter demo) · guest coupon
+limit rotatable by email/phone change · no sharp re-encode on Workers (uploads stored
+byte-exact after validation) · single D1 primary (see README → Known limitations).
+**The single-instance SQLite + file rate-limit limitations are GONE** — data, locks and
+rate limiting now live in D1, and both UI tiers are stateless.
 
 ---
 
@@ -109,12 +113,13 @@ versioned REST, D1 + R2) + **apps/admin** (Next.js, admin.*) + **packages/shared
 | 5 | `packages/shared` contracts | ✅ done — envelope/schemas consumed by apps/api |
 | 6 | `apps/admin` extraction (own Next.js app, admin.* deployable) | ✅ done — pure UI + runtime proxy; browser E2E green (login/dashboard/orders/**write persisted**/images 24-24/editor/analytics, 0 console errors) |
 | 7 | Storefront strips the admin UI (preserved in apps/admin) | ✅ done — /admin 404s on storefront; admin API kept as the proxy backend; full guest COD journey re-verified (SN100354) |
-| 8 | Port write-paths (auth, checkout, tracking ingestion, admin CRUD) from Next.js routes to Workers/D1 — **multi-session**: checkout requires redesigning the interactive Prisma transaction as D1 batch + guarded updates + compensation | ⏳ next checkpoint |
-| 9 | Storefront/admin flip to the Workers API once §8 complete | ⏳ blocked on §8 |
+| 8 | Port ALL write-paths (auth, checkout, tracking ingestion, admin CRUD) from Next.js routes to Workers/D1 — checkout redesigned as ONE atomic D1 batch (guarded INSERT..SELECT..WHERE + conditional updates + sentinel abort), order-flow stock-restore via crypto token, rate limiting → D1, uploads → R2, plus the RSC data bundles (`/v1/storefront/*`) and the hourly scheduled handler | ✅ done — 61 route files ported; Prisma-on-D1 validated in both runtimes; 62/62 tests green at the checkpoint (103 after Phase 9 moved the pure-logic suites over); DateTime epoch→ISO conversion handled by export-to-d1 |
+| 9 | Storefront/admin flip to the Workers API | ✅ done — both apps are pure UI + proxy tiers (catch-all `/api/*` → `/v1/*`, RSC `apiGet` bundles, `/v1/media` proxies, admin layout session check via `/v1/admin/auth/me`); dead monolith residue stripped (30 storefront libs, both apps' Prisma stacks, stale env requirements); E2E on the production trio: **journeys 49/49 + round5 38/38**; a real flip bug (account pages not forwarding the session cookie) was found and fixed by the new suite |
 
 **Blockers (external)**: Cloudflare account/creds for real deploy (`wrangler deploy`, D1
 remote, R2 remote) — config + local emulation are complete and tested; real supplier API
-docs/credentials; real pixel/gateway credentials.
+docs/credentials; real pixel/gateway credentials. Everything else is code-complete and
+verified locally; see `docs/VERIFICATION-REPORT.md`.
 
 **Migration tooling (Phase 8 — done)**: `apps/api/scripts/export-to-d1.ts`
 (SQLite → FK-ordered D1 INSERT chunks + row-count report; verified against the dev DB —
