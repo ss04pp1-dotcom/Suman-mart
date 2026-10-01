@@ -1,9 +1,11 @@
+import { headers } from "next/headers";
 import { apiGet, type AccountOverview } from "@/lib/backend-proxy";
 
 import { WishlistGrid } from "@/components/shop/wishlist-grid";
 
 export default async function AccountWishlistPage() {
-  const data = await apiGet<AccountOverview>("/storefront/account/overview");
+  const cookieHeader = (await headers()).get("cookie");
+  const data = await apiGet<AccountOverview>("/storefront/account/overview", cookieHeader);
   if (!data) return null; // sign-in required (client components handle the rest)
   const customer = data.customer;
 

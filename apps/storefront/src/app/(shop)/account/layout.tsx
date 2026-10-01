@@ -1,11 +1,13 @@
 import { redirect } from "next/navigation";
+import { headers } from "next/headers";
 import Link from "next/link";
 import { apiGet, type AccountOverview } from "@/lib/backend-proxy";
 import { AccountNav } from "@/components/shop/account-nav";
 import { Package } from "lucide-react";
 
 export default async function AccountLayout({ children }: { children: React.ReactNode }) {
-  const data = await apiGet<AccountOverview>("/storefront/account/overview");
+  const cookieHeader = (await headers()).get("cookie");
+  const data = await apiGet<AccountOverview>("/storefront/account/overview", cookieHeader);
   if (!data) redirect("/login?next=/account");
   const customer = data.customer;
 

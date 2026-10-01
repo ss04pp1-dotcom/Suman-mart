@@ -1,8 +1,9 @@
-// E2E driver: round-5 audit verification on the production standalone build.
+// E2E driver: round-5 audit verification on the production standalone
+// builds — THREE-TIER topology (Workers API :8787 + storefront :3111 +
+// admin app :3112, all booted via tests/e2e/boot.sh).
 //
-// Verifies, against the REAL server (booted via tests/e2e/boot.sh with
-// E2E_RESEND_API_KEY set to a deliberately invalid key — a simulated Resend
-// outage):
+// Verifies, against the REAL servers (booted with E2E_RESEND_API_KEY set to
+// a deliberately invalid key — a simulated Resend outage):
 //   Phase A — the guest-OTP endpoint reports delivery failures honestly
 //             (sent:false) and, after 3 consecutive failures, the OTP gate
 //             relaxes AUTOMATICALLY (no env hand-editing); a guest with an
@@ -16,17 +17,19 @@
 //   Phase D — the storefront checkout page renders the optional-email UI.
 //
 // SAFEGUARDS (same family as the other e2e helpers): refuses in production,
-// requires E2E_ROUND5=1, only touches a database inside this checkout. The
+// requires E2E_ROUND5=1, and only ever reads the LOCAL D1 (via wrangler —
+// the remote production database is unreachable from this driver). The
 // admin password is generated randomly per run — nothing is committed.
 //
 // NOTE: run immediately after tests/e2e/boot.sh — the outage breaker lives in
-// the SERVER process's memory and must start fresh. TrxIDs are unique per
-// run, so re-running against the same sandbox DB is safe.
-import { existsSync } from "node:fs";
+// the API server process's memory and must start fresh. TrxIDs are unique per
+// run, so re-running against the same sandbox D1 is safe.
 import { resolve } from "node:path";
+import { d1, guestOtpHashFor, sqlDate } from "./d1";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
 const BASE = process.env.E2E_BASE ?? "http://127.0.0.1:3111";
+const ADMIN_BASE = process.env.E2E_ADMIN_BASE ?? "http://127.0.0.1:3112";
 
 function bail(reason: string): never {
   console.error(`[e2e-round5] REFUSING to run: ${reason}`);
@@ -34,16 +37,6 @@ function bail(reason: string): never {
 }
 if (process.env.NODE_ENV === "production") bail("NODE_ENV=production — dev harness only.");
 if (process.env.E2E_ROUND5 !== "1") bail("set E2E_ROUND5=1 to confirm you are driving the dev sandbox server.");
-const dbUrl = process.env.DATABASE_URL ?? `file:${REPO_ROOT}/db/custom.db`;
-const dbFile = dbUrl.replace(/^file:/, "").replace(/\?[^]*$/, "");
-if (!dbFile.startsWith(REPO_ROOT) || !existsSync(dbFile)) {
-  bail(`DATABASE_URL must point inside this repository checkout (got: ${dbUrl}).`);
-}
-process.env.DATABASE_URL = dbUrl;
-
-const { PrismaClient } = await import("@prisma/client");
-const db = new PrismaClient({ datasources: { db: { url: dbUrl } } });
-const { guestOtpHashFor } = await import("../../src/lib/guest-otp");
 
 // ── tiny assertion harness ─────────────────────────────────────────────
 let passed = 0;
@@ -64,12 +57,14 @@ interface ApiResult {
   data: any;
   text: string;
 }
-async function api(path: string, init?: RequestInit & { json?: unknown; cookie?: string }): Promise<ApiResult> {
+async function callApi(base: string, path: string, init?: RequestInit & { json?: unknown; cookie?: string }): Promise<ApiResult> {
   const { json, cookie, ...rest } = init ?? {};
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(`${base}${path}`, {
     ...rest,
     headers: {
-      Origin: BASE,
+      // Origin must match the app being called — the backend's same-origin
+      // CSRF check compares it against the proxy's x-forwarded-host.
+      Origin: base,
       ...(json !== undefined ? { "Content-Type": "application/json" } : {}),
       ...(cookie ? { Cookie: cookie } : {}),
       ...((rest.headers as Record<string, string>) ?? {}),
@@ -85,12 +80,18 @@ async function api(path: string, init?: RequestInit & { json?: unknown; cookie?:
   }
   return { res, data, text };
 }
+async function api(path: string, init?: RequestInit & { json?: unknown; cookie?: string }): Promise<ApiResult> {
+  return callApi(BASE, path, init);
+}
+async function adminApi(path: string, init?: RequestInit & { json?: unknown; cookie?: string }): Promise<ApiResult> {
+  return callApi(ADMIN_BASE, path, init);
+}
 
 async function waitOutbox(to: string, subjectPart: string, timeoutMs = 15000): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const rows = await db.mailOutbox.findMany({ where: { toEmail: to } });
-    if (rows.some((r) => (r.subject ?? "").includes(subjectPart))) return true;
+    const rows = d1(`SELECT "subject" FROM "MailOutbox" WHERE "toEmail" = '${to}'`);
+    if (rows.some((r) => String(r.subject ?? "").includes(subjectPart))) return true;
     await sleep(250);
   }
   return false;
@@ -132,15 +133,14 @@ console.log("── Preflight ──");
 const pre = await api("/api/settings/public");
 check("server is up and answering JSON", pre.data?.success === true, pre.text.slice(0, 120));
 if (pre.data?.success !== true) {
-  await db.$disconnect();
   process.exit(1);
 }
-const product = await db.product.findFirst({ where: { isActive: true, stock: { gte: 10 } }, select: { id: true, name: true } });
-if (!product) {
+const productRow = d1(`SELECT "id", "name" FROM "Product" WHERE "isActive" = 1 AND "stock" >= 10 LIMIT 1`)[0];
+if (!productRow) {
   console.error("  ✘ no active product with stock — seed the sandbox first");
-  await db.$disconnect();
   process.exit(1);
 }
+const product = { id: String(productRow.id), name: String(productRow.name) };
 console.log(`  using product: ${product.name}`);
 
 // Fixed-window buckets persist in db/ratelimit.db — previous runs (and the
@@ -148,7 +148,7 @@ console.log(`  using product: ${product.name}`);
 // the driver with 429s (round-4 E2E hit exactly this). Clear them through
 // the guarded helper, same as the operator would.
 const rl = Bun.spawnSync(["bun", "tests/e2e/rl-clear.ts"], {
-  cwd: REPO_ROOT,
+  cwd: resolve(REPO_ROOT, "apps/storefront"),
   env: { ...process.env, E2E_RL_CLEAR: "1" },
   stdout: "pipe",
   stderr: "pipe",
@@ -170,25 +170,25 @@ check(
   r.text.slice(0, 160)
 );
 check("A1 the failed delivery is recorded in the outbox", await waitOutbox(A_EMAIL, "checkout code"));
-const otpOutboxRow = await db.mailOutbox.findFirst({ where: { toEmail: A_EMAIL }, orderBy: { createdAt: "desc" } });
+const otpOutboxRow = d1(`SELECT "status", "provider" FROM "MailOutbox" WHERE "toEmail" = '${A_EMAIL}' ORDER BY "createdAt" DESC LIMIT 1`)[0];
 check("A1 outbox row status FAILED via provider resend", otpOutboxRow?.status === "FAILED" && otpOutboxRow?.provider === "resend");
 
 // Inject a KNOWN code (the real one is in an undeliverable mail) and verify
 // the OTP-gated checkout path still works while the provider is failing.
-await db.guestEmailOtp.create({
-  data: {
-    email: A_EMAIL,
-    codeHash: guestOtpHashFor(A_EMAIL, "314159"),
-    expiresAt: new Date(Date.now() + 10 * 60_000),
-  },
-});
+{
+  const codeHash = await guestOtpHashFor(A_EMAIL, "314159");
+  d1(
+    `INSERT INTO "GuestEmailOtp" ("id", "email", "codeHash", "expiresAt", "attempts", "createdAt") ` +
+      `VALUES ('${crypto.randomUUID()}', '${A_EMAIL}', '${codeHash}', ${sqlDate(Date.now() + 10 * 60_000)}, 0, ${sqlDate()})`
+  );
+}
 r = await api("/api/checkout", { method: "POST", json: guestCheckout(product.id, { email: A_EMAIL, code: "314159", trxId: TRX_A }) });
 check("A2 guest bKash order with email + OTP code succeeds", r.data?.success === true, r.text.slice(0, 200));
 const orderA: string = r.data?.data?.orderNumber;
 check("A2 confirmation-mail failure recorded in the outbox (breaker failure #2)", await waitOutbox(A_EMAIL, `Order ${orderA} confirmed`));
-const orderARow = await db.order.findFirst({ where: { orderNumber: orderA } });
+const orderARow = d1(`SELECT "id", "total", "customerEmail" FROM "Order" WHERE "orderNumber" = '${orderA}'`)[0];
 check("A2 order stored with the guest email", orderARow?.customerEmail === A_EMAIL);
-const payA0 = await db.payment.findFirst({ where: { orderId: orderARow.id } });
+const payA0 = d1(`SELECT "status", "transactionId" FROM "Payment" WHERE "orderId" = '${orderARow.id}'`)[0];
 check("A2 payment row PENDING with the buyer's original TrxID", payA0?.status === "PENDING" && payA0?.transactionId === TRX_A);
 
 r = await api("/api/checkout/guest-otp", { method: "POST", json: { email: "round5.b@shopnest.com" } });
@@ -222,16 +222,19 @@ check("A6 confirmation-mail failure recorded (outbox)", await waitOutbox(D_EMAIL
 // ────────────────────────────────────────────────────────────────────────
 console.log("\n── Phase B: guest without an email (round-5 optional email) ──");
 
-const outboxBefore = await db.mailOutbox.count();
+const outboxBefore = Number(d1(`SELECT COUNT(*) AS n FROM "MailOutbox"`)[0]?.n ?? 0);
 r = await api("/api/checkout", { method: "POST", json: guestCheckout(product.id, { email: null, code: null, trxId: TRX_C }) });
 check("B1 guest bKash order with NO email succeeds", r.data?.success === true, r.text.slice(0, 200));
 const orderC: string = r.data?.data?.orderNumber;
-const orderCRow = await db.order.findFirst({ where: { orderNumber: orderC } });
-check("B1 order stored with customerEmail null", orderCRow?.customerEmail === null);
-const payC0 = await db.payment.findFirst({ where: { orderId: orderCRow.id } });
+const orderCRow = d1(`SELECT "id", "total", "customerEmail" FROM "Order" WHERE "orderNumber" = '${orderC}'`)[0];
+check("B1 order stored with customerEmail null", orderCRow?.customerEmail == null);
+const payC0 = d1(`SELECT "status", "transactionId" FROM "Payment" WHERE "orderId" = '${orderCRow.id}'`)[0];
 check("B1 payment row PENDING with the buyer's TrxID", payC0?.status === "PENDING" && payC0?.transactionId === TRX_C);
 await sleep(1500); // give any (wrongly attempted) mail a moment to appear
-check("B1 no confirmation mail was even attempted (outbox untouched)", (await db.mailOutbox.count()) === outboxBefore);
+check(
+  "B1 no confirmation mail was even attempted (outbox untouched)",
+  Number(d1(`SELECT COUNT(*) AS n FROM "MailOutbox"`)[0]?.n ?? -1) === outboxBefore
+);
 
 // ────────────────────────────────────────────────────────────────────────
 // Phase C — admin payment verification + cancel/lock semantics.
@@ -241,7 +244,7 @@ console.log("\n── Phase C: admin payment verification + cancel/lock semantic
 // Random per-run admin password (never committed) via the guarded helper.
 const adminPassword = `R5-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
 const reset = Bun.spawnSync(["bun", "tests/e2e/admin-pw.ts"], {
-  cwd: REPO_ROOT,
+  cwd: resolve(REPO_ROOT, "apps/storefront"),
   env: { ...process.env, E2E_RESET_ADMIN: "1", E2E_ADMIN_PASSWORD: adminPassword },
   stdout: "pipe",
   stderr: "pipe",
@@ -250,12 +253,12 @@ const resetOut = typeof reset.stdout === "string" ? reset.stdout : new TextDecod
 const resetErr = typeof reset.stderr === "string" ? reset.stderr : new TextDecoder().decode(reset.stderr as Uint8Array);
 check("C0 admin password reset helper ran", /sandbox admin password set/.test(resetOut), resetErr.slice(0, 200));
 
-r = await api("/api/admin/auth/login", { method: "POST", json: { email: "admin@shopnest.com", password: adminPassword } });
-check("C0 admin login", r.data?.success === true, r.text.slice(0, 200));
+r = await adminApi("/api/admin/auth/login", { method: "POST", json: { email: "admin@shopnest.com", password: adminPassword } });
+check("C0 admin login (through the admin app's proxy)", r.data?.success === true, r.text.slice(0, 200));
 const setCookies = r.res.headers.getSetCookie?.() ?? [];
 const adminCookie = setCookies.map((c) => c.split(";")[0]).find((c) => c.startsWith("sn_admin=")) ?? "";
 check("C0 admin session cookie captured", adminCookie.length > 0);
-const admin = (method: string, path: string, json?: unknown) => api(path, { method, json, cookie: adminCookie });
+const admin = (method: string, path: string, json?: unknown) => adminApi(path, { method, json, cookie: adminCookie });
 
 // C1/C2 — order A: verification requires the tick; the tick is audited.
 r = await admin("PUT", `/api/admin/orders/${orderA}`, { paymentStatus: "PAID" });
@@ -263,11 +266,11 @@ check("C1 PAID without smsVerified → 422 SMS_MATCH_REQUIRED", r.res.status ===
 
 r = await admin("PUT", `/api/admin/orders/${orderA}`, { paymentStatus: "PAID", smsVerified: true });
 check("C2 PAID with smsVerified accepted", r.data?.success === true, r.text.slice(0, 200));
-const payA1 = await db.payment.findFirst({ where: { orderId: orderARow.id } });
+const payA1 = d1(`SELECT "status", "transactionId" FROM "Payment" WHERE "orderId" = '${orderARow.id}'`)[0];
 check("C2 payment flipped to SUCCESS, original TrxID preserved", payA1?.status === "SUCCESS" && payA1?.transactionId === TRX_A);
 
-const auditRow = await db.auditLog.findFirst({ where: { action: "payment.sms_verified" }, orderBy: { createdAt: "desc" } });
-const auditDetails = auditRow ? JSON.parse(auditRow.details ?? "{}") : {};
+const auditRow = d1(`SELECT "details" FROM "AuditLog" WHERE "action" = 'payment.sms_verified' ORDER BY "createdAt" DESC LIMIT 1`)[0];
+const auditDetails = auditRow ? JSON.parse(String(auditRow.details ?? "{}")) : {};
 check(
   "C2b the tick is AUDITED: who confirmed, which TrxID, which amount, when",
   auditRow != null &&
@@ -286,8 +289,8 @@ r = await admin("PUT", `/api/admin/orders/${orderD}`, {
   note: "money arrived, refunded via the bKash app",
 });
 check("C3 combined PAID+CANCELLED save accepted", r.data?.success === true, r.text.slice(0, 200));
-const orderDRow = await db.order.findFirst({ where: { orderNumber: orderD } });
-const payD1 = await db.payment.findFirst({ where: { orderId: orderDRow.id } });
+const orderDRow = d1(`SELECT "id", "status", "paymentStatus" FROM "Order" WHERE "orderNumber" = '${orderD}'`)[0];
+const payD1 = d1(`SELECT "status", "transactionId" FROM "Payment" WHERE "orderId" = '${orderDRow.id}'`)[0];
 check(
   "C3 payment SUCCESS with the ORIGINAL TrxID — NOT released (round-5 ordering)",
   payD1?.status === "SUCCESS" && payD1?.transactionId === TRX_B && !payD1.transactionId.includes("-RELEASED-")
@@ -300,7 +303,7 @@ check("C4 the verified TrxID stays LOCKED — a new order with it is rejected 40
 // C5/C6 — order C: plain cancel (no money arrived) still releases the claim.
 r = await admin("PUT", `/api/admin/orders/${orderC}`, { status: "CANCELLED", note: "buyer never paid" });
 check("C5 plain cancel accepted", r.data?.success === true, r.text.slice(0, 200));
-const payC1 = await db.payment.findFirst({ where: { orderId: orderCRow.id } });
+const payC1 = d1(`SELECT "status", "transactionId" FROM "Payment" WHERE "orderId" = '${orderCRow.id}'`)[0];
 check("C5 unverified TrxID released (renamed -RELEASED-<orderNumber>)", payC1?.transactionId === `${TRX_C}-RELEASED-${orderC}`);
 
 r = await api("/api/checkout", { method: "POST", json: guestCheckout(product.id, { email: null, code: null, trxId: TRX_C }) });
@@ -327,7 +330,7 @@ check("D1 honest provider-failure copy shipped", bundle.includes("Could not send
 // page's HTML — sweep every built chunk on disk instead (the driver runs
 // beside the standalone build it is testing).
 const { readdirSync, readFileSync } = await import("node:fs");
-const chunksDir = resolve(REPO_ROOT, ".next/standalone/.next/static/chunks");
+const chunksDir = resolve(REPO_ROOT, "apps/storefront/.next/standalone/apps/storefront/.next/static/chunks");
 let allChunks = "";
 try {
   for (const f of readdirSync(chunksDir)) {
@@ -336,10 +339,18 @@ try {
 } catch {
   /* directory layout changed — the checks below will report honestly */
 }
-check("D1 admin cancel-warning copy shipped (TrxID-release warning)", allChunks.includes("Cancelling now will release TrxID"));
-check("D1 admin SMS-match tick copy still shipped", allChunks.includes("I matched the amount and TrxID"));
+let adminChunks = "";
+const adminChunksDir = resolve(REPO_ROOT, "apps/admin/.next/standalone/apps/admin/.next/static/chunks");
+try {
+  for (const f of readdirSync(adminChunksDir)) {
+    if (f.endsWith(".js")) adminChunks += readFileSync(resolve(adminChunksDir, f), "utf8");
+  }
+} catch {
+  /* directory layout changed — the checks below will report honestly */
+}
+check("D1 admin cancel-warning copy shipped (TrxID-release warning)", adminChunks.includes("Cancelling now will release TrxID"));
+check("D1 admin SMS-match tick copy still shipped", adminChunks.includes("I matched the amount and TrxID"));
 
 // ── summary ────────────────────────────────────────────────────────────
 console.log(`\n── Result: ${passed} passed, ${failed} failed ──`);
-await db.$disconnect();
 process.exit(failed === 0 ? 0 : 1);

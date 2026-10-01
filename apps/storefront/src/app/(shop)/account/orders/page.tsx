@@ -1,6 +1,7 @@
 import Link from "next/link";
 import Image from "next/image";
 
+import { headers } from "next/headers";
 import { apiGet, type OrderRow } from "@/lib/backend-proxy";
 import { formatBDT, formatDate } from "@/lib/format";
 import { OrderStatusBadge } from "@/components/shop/order-timeline";
@@ -8,7 +9,8 @@ import { Button } from "@/components/ui/button";
 import { ChevronRight, Package } from "lucide-react";
 
 export default async function AccountOrdersPage() {
-  const data = await apiGet<{ orders: OrderRow[] }>("/storefront/account/orders");
+  const cookieHeader = (await headers()).get("cookie");
+  const data = await apiGet<{ orders: OrderRow[] }>("/storefront/account/orders", cookieHeader);
   if (!data) return null;
   const orders = data.orders;
 

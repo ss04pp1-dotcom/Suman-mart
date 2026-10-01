@@ -51,7 +51,8 @@ const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
 const sql = `
 DELETE FROM OrderItem; DELETE FROM OrderStatusHistory; DELETE FROM Payment; DELETE FROM SupplierOrder; DELETE FROM "Order";
 DELETE FROM Review; DELETE FROM ProductRelation; DELETE FROM ProductTag; DELETE FROM ProductVariant; DELETE FROM ProductImage; DELETE FROM Product;
-DELETE FROM Coupon; DELETE FROM SupplierProduct; DELETE FROM Supplier; DELETE FROM Category; DELETE FROM Tag;
+DELETE FROM Coupon; DELETE FROM SupplierProduct; DELETE FROM SupplierSyncLog; DELETE FROM Supplier; DELETE FROM Category; DELETE FROM Tag;
+DELETE FROM Banner; DELETE FROM HomepageSection; DELETE FROM RateLimitEntry;
 DELETE FROM Admin; DELETE FROM AdminRecoveryCode; DELETE FROM Customer; DELETE FROM Address;
 DELETE FROM Setting; DELETE FROM TrackingIntegration; DELETE FROM TrackingSession; DELETE FROM TrackingEvent; DELETE FROM CookieConsent;
 DELETE FROM Notification; DELETE FROM AuditLog; DELETE FROM AuthToken; DELETE FROM GuestEmailOtp; DELETE FROM MailOutbox; DELETE FROM SequenceCounter;

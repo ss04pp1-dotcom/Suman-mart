@@ -1,9 +1,11 @@
 
+import { headers } from "next/headers";
 import { apiGet, type AccountOverview } from "@/lib/backend-proxy";
 import { AddressManager } from "@/components/shop/address-manager";
 
 export default async function AccountAddressesPage() {
-  const data = await apiGet<AccountOverview>("/storefront/account/overview");
+  const cookieHeader = (await headers()).get("cookie");
+  const data = await apiGet<AccountOverview>("/storefront/account/overview", cookieHeader);
   if (!data) return null;
   const addresses = data.customer.addresses;
 

@@ -1,10 +1,12 @@
 
+import { headers } from "next/headers";
 import { apiGet, type AccountOverview } from "@/lib/backend-proxy";
 import { formatBDT, formatDate } from "@/lib/format";
 import { Package, ShoppingBag, Truck, Wallet } from "lucide-react";
 
 export default async function AccountProfilePage() {
-  const data = await apiGet<AccountOverview>("/storefront/account/overview");
+  const cookieHeader = (await headers()).get("cookie");
+  const data = await apiGet<AccountOverview>("/storefront/account/overview", cookieHeader);
   if (!data) return null;
   const customer = data.customer;
   const orderCount = data.stats.orderCount;

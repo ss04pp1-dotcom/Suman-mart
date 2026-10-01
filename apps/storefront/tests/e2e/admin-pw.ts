@@ -1,4 +1,4 @@
-// E2E helper: set a known password for the sandbox admin account.
+// E2E helper: set a known password for the sandbox admin account (local D1).
 //
 // SAFEGUARDS (round-4 audit — this script once carried a committed default
 // password and a hardcoded sandbox path; if run by mistake against a
@@ -8,13 +8,9 @@
 //   2. Requires an explicit opt-in: E2E_RESET_ADMIN=1
 //   3. The password comes from E2E_ADMIN_PASSWORD — there is NO default, so
 //      no usable credential is committed to the repository.
-//   4. The target database comes from DATABASE_URL and must be a local file
-//      inside this repository checkout (dev sandbox), never a remote URL.
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
-import { PrismaClient } from "@prisma/client";
-
-const REPO_ROOT = resolve(import.meta.dir, "../../../..");
+//   4. It targets the LOCAL D1 only (`wrangler d1 execute --local`) — the
+//      remote production database is never reachable from this helper.
+import { d1run, hashPassword } from "./d1";
 
 function bail(reason: string): never {
   console.error(`[e2e-admin-pw] REFUSING to run: ${reason}`);
@@ -32,19 +28,9 @@ if (!password || password.length < 8) {
   bail("set E2E_ADMIN_PASSWORD (min 8 chars) — no default password is committed.");
 }
 
-// The target DB must be a SQLite file inside this checkout.
-const url = process.env.DATABASE_URL ?? `file:${REPO_ROOT}/db/custom.db`;
-const filePath = url.replace(/^file:/, "").replace(/\?[^]*$/, "");
-if (!filePath.startsWith(REPO_ROOT) || !existsSync(filePath)) {
-  bail(`DATABASE_URL must point at a database inside this repository checkout (got: ${url}).`);
-}
-
-const { hashPassword } = await import("../../src/lib/password");
-const db = new PrismaClient({ datasources: { db: { url } } });
 const hash = await hashPassword(password);
-await db.admin.update({
-  where: { email: "admin@shopnest.com" },
-  data: { passwordHash: hash, mustChangePassword: false, isActive: true, tokenVersion: { increment: 1 } },
-});
+d1run(
+  `UPDATE "Admin" SET "passwordHash" = '${hash}', "mustChangePassword" = 0, "isActive" = 1, ` +
+    `"tokenVersion" = "tokenVersion" + 1 WHERE "email" = 'admin@shopnest.com'`
+);
 console.log("[e2e-admin-pw] sandbox admin password set (value taken from E2E_ADMIN_PASSWORD, not committed).");
-await db.$disconnect();

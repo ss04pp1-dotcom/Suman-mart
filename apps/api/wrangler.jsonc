@@ -21,7 +21,12 @@
   // Public read API — no secrets here. Secrets (future admin tokens, provider
   // keys) go in `wrangler secret put`, never in this file.
   "vars": {
-    "ALLOWED_ORIGINS": "*",
+    // Fail-closed by default: the storefront/admin reach the API through their
+    // same-origin runtime proxies, so no cross-origin browser access is needed.
+    // Direct-browser API consumers (e.g. a future mobile app) must list their
+    // origins here in production. "*" is allowed for local experimentation but
+    // must never ship with credentials enabled.
+    "ALLOWED_ORIGINS": "",
     "ENVIRONMENT": "development"
   },
   "d1_databases": [
