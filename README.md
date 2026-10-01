@@ -1,18 +1,22 @@
 # ShopNest — Full-Stack E-Commerce & Dropshipping Platform
 
-A production-grade e-commerce platform with a **customer storefront** and a **separate admin management console** sharing one backend, one database, and one tracking/analytics engine.
+A production-grade e-commerce platform delivered as a **monorepo of three independently deployable apps** — a customer **storefront**, an **admin console**, and a versioned **REST API on Cloudflare Workers** (D1 database + R2 media) — sharing one data model, one tracking/analytics engine, and one set of contracts (`packages/shared`).
 
 ```
-Customer (shop.example.com)          Admin (admin.example.com)
-        │                                    │
-        └──────────────┬─────────────────────┘
-                       ▼
-              REST API (Next.js route handlers)
-                       │
-        ┌──────────────┼─────────────────┐
-        ▼              ▼                 ▼
-   SQLite (Prisma)  Image storage     Supplier APIs
-   (database)       (local / R2)      (adapter interface)
+Customer storefront              Admin console                (any client)
+  shop.example.com                 admin.example.com
+  apps/storefront (Next.js)        apps/admin (Next.js, UI only)
+        │                                │  proxies /api/admin/*
+        │  serves /api/* (Node API)  ◄──┘  (BACKEND_ORIGIN)
+        ▼
+  ┌───────────────────────────────────────────────┐
+  │  Backend API                                   │
+  │  • apps/storefront /api/*  — full write-path   │
+  │    (auth, checkout, admin CRUD, tracking)      │
+  │  • apps/api (Cloudflare Workers) — /v1 public  │
+  │    read API: catalog, settings, order tracking │
+  │    → D1 (SQLite) + R2 (media)                  │
+  └───────────────────────────────────────────────┘
         │
         ▼
    Tracking & Analytics Engine (first-party, cookie-consent aware)
@@ -23,16 +27,35 @@ Customer (shop.example.com)          Admin (admin.example.com)
  (server-side forwarding, browser+server event-ID dedup)
 ```
 
+**Migration state (strangler, see `docs/FEATURE-INVENTORY.md §8`)**: the public read
+surface is LIVE on the Workers API (`apps/api`, tested against real local D1+R2).
+The write-path (auth, checkout, tracking ingestion, admin CRUD) still runs on the
+storefront's Node API — the admin app consumes it through a runtime proxy, so when
+those endpoints port to Workers, only `BACKEND_ORIGIN` changes. **No feature was
+removed or mocked during the split — every page, route and flow was re-verified
+end-to-end after the restructure.**
+
 ## Quick start
 
 ```bash
 git clone <repo-url> shopnest && cd shopnest
-bun install                # or npm/pnpm install
-cp .env.example .env       # then set the secrets (see below)
-bun run db:generate        # generate the Prisma client
-bun run db:deploy          # create the SQLite schema (prisma migrate deploy)
-bun run db:seed            # seed demo data + create the admin account
-bun run dev                # http://localhost:3000  (storefront + /admin)
+bun install                     # workspace install (apps/* + packages/*)
+cp apps/storefront/.env.example apps/storefront/.env   # set the secrets (see below)
+cp apps/admin/.env.example     apps/admin/.env          # admin UI (proxies to :3000)
+bun run db:generate            # generate the Prisma clients (both apps)
+bun run db:deploy              # create the SQLite schema (prisma migrate deploy)
+bun run db:seed                # seed demo data + create the admin account
+bun run dev                    # storefront  → http://localhost:3000
+bun run dev:admin              # admin app   → http://localhost:3001  (separate shell)
+```
+
+The Workers API has its own local loop (no Cloudflare account needed):
+
+```bash
+cd apps/api
+bunx wrangler d1 migrations apply suman-mart --local   # local D1
+bun run dev                                            # http://localhost:8787
+bun run test                                           # 35 integration tests (real local D1+R2)
 ```
 
 ### Seeded credentials
@@ -124,12 +147,21 @@ Browse → Product → Variant → Add to Cart → Checkout (COD)
 
 ## Architecture
 
-### Two applications, one platform
-- `src/app/(shop)/**` — **Customer storefront**: homepage, catalog, product pages, cart, multi-step checkout, order tracking, account, wishlist, password reset, email verification. Conversion-focused UI, mobile-first.
-- `src/app/admin/**` — **Admin console** (`/admin/login` is standalone; all other admin routes sit behind an auth-guarded shell). Dark sidebar, data-dense dashboards, desktop-first but fully responsive.
-- `src/app/api/**` — shared REST API. Admin endpoints are protected by role-based permissions and audited; customer endpoints validate every mutation server-side.
+### Monorepo — three deployables + shared packages
 
-### Key subsystems
+| App | Deploy as | Serves | Notes |
+|---|---|---|---|
+| `apps/storefront` | standalone Next.js (Node/Bun) | customer UI (`/`) **+ the full `/api/*` backend** (customer + admin APIs) during the migration | SQLite via Prisma; also the `BACKEND_ORIGIN` the admin app proxies to |
+| `apps/admin` | standalone Next.js (Node/Bun) | admin UI only (`/admin/**`) — **no database, no business logic** | every `/api/admin/*` call is proxied at RUNTIME (`src/lib/backend-proxy.ts`) to `BACKEND_ORIGIN`; media paths proxied the same way | 
+| `apps/api` | Cloudflare Worker (Hono) | versioned public read API `/v1/*` + `/health` + R2 media | D1 (migrations generated from the Prisma schema) + R2; per-IP rate limiting in D1; CORS + security headers |
+| `packages/shared` | — | API contracts: response envelope, zod schemas, pagination | imported by `apps/api` (and available to both frontends) |
+
+The storefront keeps `apps/storefront/src/app/api/admin/**` on purpose: it is the
+backend the admin app proxies to until those endpoints finish porting to Workers.
+The admin UI itself now lives ONLY in `apps/admin` (visiting `shop.example.com/admin`
+returns 404 by design — the console is a separate deployment).
+
+### Key subsystems (all in `apps/storefront/src/lib` — shared verbatim into `apps/admin` where the UI needs them)
 | Subsystem | Where | Notes |
 |-----------|-------|-------|
 | Auth | `src/lib/jwt.ts`, `password.ts`, `auth.ts`, `admin-auth.ts`, `totp.ts`, `recovery.ts` | PBKDF2-SHA256 (600k iter, transparent upgrade of old hashes), HS256 session cookies with `tokenVersion` revocation (password change / deactivation kills all sessions), TOTP 2FA for admins with **one-time recovery codes** (lost device no longer locks the account out) |
@@ -141,7 +173,7 @@ Browse → Product → Variant → Add to Cart → Checkout (COD)
 | Tracking | `src/lib/tracking.ts`, `tracking-client.ts` | First-party collector with HMAC-signed sessions, **server-only Purchase events**, per-session hourly event quotas (spoofed AddToCart floods are bounded), session/UTM attribution, consent enforcement, 180-day retention |
 | Pixels | `src/lib/pixels.ts` | Meta CAPI, GA4 MP, TikTok Events API, custom webhook (SSRF-guarded, timed out) — secrets stay server-side |
 | Analytics | `src/lib/analytics.ts` | KPIs, daily series, funnel, campaigns, product/search analytics, abandoned carts, consent stats, live activity. Revenue is always sourced from ORDERS (authoritative) |
-| Storage | `src/lib/storage.ts` | Magic-byte type verification, sharp re-encode (strips payloads), SVG banned; swap internals for an R2 binding in production |
+| Storage | `src/lib/storage.ts` (storefront) | Magic-byte type verification, sharp re-encode (strips payloads), SVG banned; R2 is LIVE on the Workers API (`/v1/media/*` reads the bucket; uploads port with the admin write-path) |
 | Mail | `src/lib/mailer.ts` | Outbox pattern + optional Resend delivery for order confirmations (guests included), status updates, password resets, email verification. **One-time tokens are redacted before outbox storage**. Round 5: delivery outcomes feed an outage breaker — 3 consecutive failures relax the guest-OTP gate automatically for 10 minutes (one probe attempt is allowed after the cooldown; a further failure re-trips it) |
 
 ### Security model
@@ -162,40 +194,74 @@ Browse → Product → Variant → Add to Cart → Checkout (COD)
 
 (`RateLimitEntry` deliberately lives in a **second Prisma schema** — `prisma/ratelimit/schema.prisma` — backed by its own SQLite file, so rate-limit writes never contend with checkout. The table is created lazily on first use; no migration needed.)
 
-Prisma (`prisma/schema.prisma`) is the single source of truth, managed with **versioned migrations** (`prisma/migrations/`):
+Prisma (`apps/storefront/prisma/schema.prisma`) is the single source of truth (the admin app carries a copy of the schema purely for client generation; migrations are owned by the storefront), managed with **versioned migrations** (`apps/storefront/prisma/migrations/`):
 - Fresh install / deploys: `bun run db:deploy` (`prisma migrate deploy` — applies pending migrations)
 - Local schema changes: `bun run db:migrate` (`prisma migrate dev` — creates a new migration file)
 - **Back up `db/custom.db` before every deploy** (simple file copy while the server is stopped); the migration history lives in `_prisma_migrations`.
 
-**Deploying the round-3+ migrations onto a database created before them**: the round-3 migration adds a UNIQUE index on `Payment.transactionId`. Databases created before that could legally hold duplicates, so the migration **self-heals first** — empty strings become NULL, and for duplicate IDs the OLDEST row keeps the ID while younger ones are renamed `<id>-DUP-<rowid>` (bookkeeping only; no payment is altered). Inspect beforehand with the read-only report: `bun scripts/check-trxid-duplicates.ts`.
+**Deploying the round-3+ migrations onto a database created before them**: the round-3 migration adds a UNIQUE index on `Payment.transactionId`. Databases created before that could legally hold duplicates, so the migration **self-heals first** — empty strings become NULL, and for duplicate IDs the OLDEST row keeps the ID while younger ones are renamed `<id>-DUP-<rowid>` (bookkeeping only; no payment is altered). Inspect beforehand with the read-only report: `bun apps/storefront/scripts/check-trxid-duplicates.ts`.
 > Dev note (round-5 verification): the sandbox database applied the round-3 migration AFTER the self-heal edit — its stored checksum matches the current file byte-for-byte, and `bunx prisma migrate status` reports “Database schema is up to date!”. Any environment that applied the PRE-edit version would see a `migrate dev` checksum mismatch — in that case the index already exists, so `prisma migrate reset` (dev) is the clean path; `migrate deploy` environments are unaffected either way (deploy does not re-verify applied checksums). Do NOT revert the file: that would CREATE a mismatch against every database that applied the current version.
 
 ## API overview
 
 **Customer** — `/api/products`, `/api/products/[slug]`, `/api/categories`, `/api/auth/{register,login,logout,me,forgot,reset,verify-email}`, `/api/cart/validate`, `/api/checkout`, `/api/checkout/guest-otp` (one-time email code for guest checkout — only for guests who give an email, and only while a mail provider is configured & healthy; answers `sent:false` honestly on a delivery failure), `/api/orders/track`, `/api/account/*`, `/api/reviews`, `/api/tracking/{session,events,consent}`, `/api/settings/public`
 
-**Admin** (auth + permission guarded) — `/api/admin/auth/{login,logout,me,password,totp}`, `/api/admin/dashboard`, `/api/admin/products(+/[id],/bulk)`, `/api/admin/orders(+/[id])`, `/api/admin/customers(+/[id])`, `/api/admin/categories|coupons|banners|reviews`, `/api/admin/suppliers(+/[id]/sync, /products/import, /orders/[id])`, `/api/admin/analytics/{overview,funnel,events(+/[id]),campaigns,products,searches,consent,abandoned,live}`, `/api/admin/settings(+/test-integration)`, `/api/admin/notifications`, `/api/admin/upload`, `/api/admin/reports/export?type=…&range=…` (CSV), `/api/admin/team`, `/api/admin/maintenance`
+**Admin** (auth + permission guarded, consumed by `apps/admin` through the proxy) — `/api/admin/auth/{login,logout,me,password,totp}`, `/api/admin/dashboard`, `/api/admin/products(+/[id],/bulk)`, `/api/admin/orders(+/[id])`, `/api/admin/customers(+/[id])`, `/api/admin/categories|coupons|banners|reviews`, `/api/admin/suppliers(+/[id]/sync, /products/import, /orders/[id])`, `/api/admin/analytics/{overview,funnel,events(+/[id]),campaigns,products,searches,consent,abandoned,live}`, `/api/admin/settings(+/test-integration)`, `/api/admin/notifications`, `/api/admin/upload`, `/api/admin/reports/export?type=…&range=…` (CSV), `/api/admin/team`, `/api/admin/maintenance`
+
+**Workers API v1** (Cloudflare, `apps/api` — documented in `docs/API.md`) — `GET /health`, `GET /v1/products` (q/category/tag/price/availability/featured filters + 7 sorts + pagination), `GET /v1/products/:slug` (detail + variants + approved reviews + manual/auto recommendations + FBT; `costPrice` deliberately excluded), `GET /v1/categories`, `GET /v1/settings/public`, `POST /v1/orders/track` (phone-matched, rate-limited), `GET /v1/media/*` (R2). Same success/error envelope as the Node API; zod-validated queries; CORS + security headers + per-IP D1 rate limiting.
 
 ## Scripts
+
+Root scripts delegate into the workspace apps:
 ```
-bun run dev        # dev server (port 3000)
-bun run build      # production build (type errors fail the build)
-bun run start      # production server (standalone — Node or Bun)
-bun run lint       # eslint
-bun run test       # vitest: 84 unit + integration tests
-bun run db:deploy  # apply migrations (use this in production)
-bun run db:migrate # create a new migration from schema changes (dev)
-bun run db:seed    # seed demo data + bootstrap admin
+bun run dev            # storefront dev server (port 3000)
+bun run dev:admin      # admin app dev server (port 3001)
+bun run build          # production builds: storefront + admin
+bun run lint           # eslint (both apps)
+bun run test           # storefront suite: 93 unit + integration tests
+bun run test:api       # Workers API suite: 35 integration tests (real local D1 + R2)
+bun run typecheck      # tsc --noEmit for both Next.js apps
+cd apps/api && bun run dev / test / deploy   # Workers API loop
+bun run db:deploy      # apply migrations (use this in production)
+bun run db:migrate     # create a new migration from schema changes (dev)
+bun run db:seed        # seed demo data + bootstrap admin
 ```
 
-## Deployment notes
+## Deployment
 
-**The canonical deployment is a single self-hosted Next.js app (Node or Bun) with SQLite and local-disk uploads.** The build produces a standalone server (`output: "standalone"`, `bun run start`). Nothing in this repo deploys to Cloudflare Workers as-is — see the migration path note at the end.
+**Three independently deployable apps.** The storefront and admin app are standalone
+Next.js servers (Node or Bun); the API is a Cloudflare Worker with D1 + R2 bindings.
+
+### A. Storefront (`shop.example.com`) — Node/Bun
 
 1. Provision Node 20+ / Bun 1.1+.
 2. Set the environment variables (strong 32-byte secrets, `TOTP_ENC_KEY` — **mandatory, the server refuses to boot without it** — and a site URL; remember `NEXT_PUBLIC_SITE_URL` is baked in at BUILD time while the plain `SITE_URL` is read at RUNTIME and wins).
-3. `bun install && bun run db:deploy && bun run db:seed && bun run build && bun run start` — run behind nginx/Caddy/Cloudflare and set the matching `TRUST_PROXY` value (matrix below). **A reverse proxy/CDN in front of the server is a production REQUIREMENT, not an option**: with direct exposure any client can forge a single-entry `x-forwarded-for` and rotate fresh rate-limit buckets (the server logs a boot warning while `TRUST_PROXY` is unset).
+3. `cd apps/storefront && bun install && bun run db:deploy && bun run db:seed && bun run build && bun run start` — run behind nginx/Caddy/Cloudflare and set the matching `TRUST_PROXY` value (matrix below). **A reverse proxy/CDN in front of the server is a production REQUIREMENT, not an option**: with direct exposure any client can forge a single-entry `x-forwarded-for` and rotate fresh rate-limit buckets (the server logs a boot warning while `TRUST_PROXY` is unset).
 4. Place `db/custom.db` (and `db/ratelimit.db`) on a persistent volume — both are gitignored. **Back them up before every deploy.**
+5. The standalone server lives at `apps/storefront/.next/standalone/apps/storefront/server.js` (bun-workspace layouts are nested — the build script copies `static/` + `public/` into place).
+
+### B. Admin app (`admin.example.com`) — Node/Bun, UI only
+
+1. `cd apps/admin && bun install && bun run build && bun run start` (port 3001 by default; front it with TLS).
+2. Set `BACKEND_ORIGIN=https://shop.example.com` — every `/api/admin/*` request and all media paths are proxied there at RUNTIME (config rewrites would bake the origin at build time; see `apps/admin/src/lib/backend-proxy.ts`). Once the admin write-paths port to the Workers API, this flips to `https://api.example.com` with **no code change**.
+3. The admin app has **no database and no business logic** — compromise of the admin deployment cannot leak customer data; the same RBAC still applies at the backend.
+4. Transitional note: because the admin app proxies at the HTTP layer, per-IP rate limits on the backend see the proxy — per-EMAIL lockouts (admin login, 2FA) remain exact.
+
+### C. API (`api.example.com`) — Cloudflare Workers + D1 + R2
+
+```bash
+cd apps/api
+wrangler d1 create suman-mart            # put the returned database_id in wrangler.jsonc
+wrangler r2 bucket create suman-mart-media
+bunx prisma migrate diff --from-empty --to-schema-datamodel ../storefront/prisma/schema.prisma --script   # regenerate 0001 if the schema moved
+wrangler d1 migrations apply suman-mart --remote
+bun run deploy                            # wrangler deploy
+```
+
+- **CORS**: set `ALLOWED_ORIGINS` (comma-separated) to your storefront/admin origins — `"*"` is only acceptable while the API stays read-only public.
+- **Data migration** (existing SQLite → D1): `bun apps/api/scripts/export-to-d1.ts db/custom.db apps/api/export` emits FK-ordered INSERT chunks (never deletes anything); import with `wrangler d1 execute suman-mart --remote --file …`, then validate against the printed per-table row counts. Create a time-travel bookmark FIRST (`wrangler d1 time-travel info suman-mart --remote`) — restore is the rollback path.
+- **Media migration** (local files → R2): `bash apps/api/scripts/migrate-media-to-r2.sh` (dry run) then `--local`/`--remote` — uploads `public/{products,banners,categories,uploads}` under matching keys, served at `/v1/media/*`.
+- The D1 migrations are generated from the Prisma schema — when `apps/storefront/prisma/schema.prisma` changes, regenerate and review the diff before applying.
 
 ### Client IP & proxy configuration
 
@@ -227,10 +293,10 @@ For hardened deployments, put a reverse proxy in front and set the matching `TRU
 - **Run behind a reverse proxy/CDN (Cloudflare/nginx/Caddy) and set the matching `TRUST_PROXY` value — REQUIRED** (matrix above). Direct exposure allows forged `x-forwarded-for` bucket rotation; the server warns at boot while `TRUST_PROXY` is unset.
 - Configure `RESEND_API_KEY` for transactional mail (password reset requires it — tokens are redacted in the outbox by design; it also activates the guest-checkout email OTP for guests who give an email). If Resend has an outage the OTP gate relaxes automatically after 3 consecutive failed deliveries (round-5 breaker) — no env hand-editing, and no mail-bombing vector opens because nothing can be delivered during the outage.
 - Set `TOTP_ENC_KEY` (openssl rand -hex 32) — **mandatory**: production boots are refused without it.
-- Uploads live in `public/uploads` — mount a persistent volume, or port `src/lib/storage.ts` to S3/R2.
+- Uploads live in `public/uploads` — mount a persistent volume, or serve media from the Workers API's R2 bucket (`/v1/media/*` + `apps/api/scripts/migrate-media-to-r2.sh`).
 - **Scaling beyond one server**: move to Postgres + Redis for rate limiting; the checkout guards and rate-limit design already hold across instances sharing a database (see Known limitations).
 
-**Cloudflare migration path** (future re-architecture, NOT the current deployment): split `src/app/(shop)` and `src/app/admin` into separate Pages/Workers apps, move `/api` route handlers into one shared Worker, replace SQLite with D1, the rate-limit store with KV, and `storage.ts` with an R2 binding. The raw SQL in `analytics.ts` is already plain SQLite.
+**Remaining Cloudflare migration work (tracked in `docs/FEATURE-INVENTORY.md §8`)**: the write-path (auth, checkout with its interactive Prisma transaction, tracking ingestion, admin CRUD) still runs on the storefront's Node API. Porting checkout to D1 requires re-expressing the transaction as D1 batch + guarded updates + compensation — deliberately NOT rushed, it is the most race-tested code in the platform. The admin app is already architected for the cutover (`BACKEND_ORIGIN` flip only).
 
 ## QA — verified against the production build
 
@@ -255,5 +321,9 @@ Every fix below was verified against `next build` + the standalone production se
 | Exports | CSV formula-injection neutralized (unit-tested) |
 | SSRF | Private IPs, localhost, `.internal`, non-HTTPS blocked for webhooks/supplier URLs |
 | Builds | `tsc --noEmit` clean, ESLint 0 errors, 93 vitest tests green (unit + checkout/stock/coupon/concurrency integration), production build with `ignoreBuildErrors: false` |
+| Monorepo split | After moving the monolith to `apps/storefront`: same 93 tests green, tsc clean, build green, root `bun run dev` still serves :3000. Admin UI extracted to `apps/admin` (pure UI + runtime proxy): tsc clean, build green, **browser-verified E2E on the production standalone pair (:3111 storefront / :3112 admin)** — login through the proxy (cookie round-trip), dashboard KPIs, orders list + detail, **write path (status PENDING→CONFIRMED + note) persisted in the DB with operator identity through the proxy (sameOrigin CSRF passes via x-forwarded-host forwarding)**, 24/24 product images via the media proxy, 7-tab product editor, analytics — zero console errors. Storefront after the split: `/admin` 404s, full guest COD journey re-verified end-to-end (order SN100354, no email → no OTP demanded, no outbox mail, tracking works), zero console errors |
+| Workers API | **35 integration tests green against REAL local D1 + R2 (workerd, no mocks)**: health + live-DB check, products list (default order, image mapping, q over name/shortDescription/brand, category/tag/price-range COMBINED/availability/featured filters, all sorts, pagination caps, 422 on invalid query), product detail (variants parsed, approved-only reviews, manual+auto recommendations, FBT, **costPrice never exposed**), categories with active-product counts, public settings (stored-over-defaults merge, pixels from integrations, secrets never in the response), order tracking (phone-match privacy rule, last-10-digit matching, identical 404 for wrong phone/unknown order, 422 validation, **429 after the 20/10min per-IP window**), R2 media route (content-type + immutable caching, 404 envelope, traversal rejected), CORS echo + preflight, baseline security headers on every response, standard 404/500 envelopes. `wrangler dev` boots and serves the migrated local D1 |
 
-Unit + integration tests: `bun run test` — password hashing/rehash detection, CSV/JSON-LD escaping, order status flow **+ TrxID release on cancel/return + PAID-before-release lock (round 5)**, TOTP RFC vectors + secret encryption (v1/v2 + rotation semantics) + replay, recovery-code generation/normalization/hashing, **guest-checkout email OTP (policy matrix + issue/consume/single-use/attempt-burn/expiry/supersede + ATOMIC attempt burning under concurrency + outbox redaction)**, **provider-outage breaker (trip / cooldown probe / re-trip / success-reset)**, email-gate policy matrix, SSRF guard, mail token redaction, and **checkout integration tests against a real SQLite database** (stock races up to 16 concurrent, variant races, coupon usage limits incl. guest email/phone identity, TrxID uniqueness under concurrency, post-commit failure isolation, **guest order without an email**).
+Unit + integration tests: `bun run test` (storefront, 93) — password hashing/rehash detection, CSV/JSON-LD escaping, order status flow **+ TrxID release on cancel/return + PAID-before-release lock (round 5)**, TOTP RFC vectors + secret encryption (v1/v2 + rotation semantics) + replay, recovery-code generation/normalization/hashing, **guest-checkout email OTP (policy matrix + issue/consume/single-use/attempt-burn/expiry/supersede + ATOMIC attempt burning under concurrency + outbox redaction)**, **provider-outage breaker (trip / cooldown probe / re-trip / success-reset)**, email-gate policy matrix, SSRF guard, mail token redaction, and **checkout integration tests against a real SQLite database** (stock races up to 16 concurrent, variant races, coupon usage limits incl. guest email/phone identity, TrxID uniqueness under concurrency, post-commit failure isolation, **guest order without an email**).
+
+Workers API tests: `bun run test:api` (35) — every `/v1` endpoint against a REAL local D1 + R2 (workerd), including rate limiting, CORS, security headers and error envelopes. See `apps/api`.

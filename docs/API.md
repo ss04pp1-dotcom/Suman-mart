@@ -105,3 +105,64 @@ Auth via `sn_admin` cookie. Each route requires a permission (see `lib/permissio
 - Essential-only → no analytics, no pixels
 - Analytics → first-party events collected
 - Marketing → third-party pixels load and receive browser copies; server events forward to Meta CAPI / GA4 MP / TikTok Events API only with marketing consent
+
+## Workers API v1 (`apps/api` — Cloudflare, api.example.com)
+
+Public read surface served from Cloudflare Workers + D1 + R2. Same response
+envelope as the Node API. All responses carry `X-API-Version: v1`, baseline
+security headers, and `Cache-Control: no-store` (media excepted). Cross-origin
+browser use is governed by `ALLOWED_ORIGINS` (preflight `OPTIONS` answered on
+every route).
+
+### GET /health
+`200 {status:"ok", checks:{database:"ok"}, environment, time}` — `503 degraded`
+when the D1 binding cannot answer.
+
+### GET /v1/products
+Query parameters (zod-validated → `422 {code:"VALIDATION_ERROR"}` on bad input):
+
+| Param | Type | Notes |
+|---|---|---|
+| `q` | string | matches name / shortDescription / brand (ASCII case-insensitive) |
+| `category` | slug | category filter |
+| `tag` | slug | tag filter |
+| `minPrice` / `maxPrice` | int | **combine** into one range |
+| `availability` | `in_stock` \| `out_of_stock` | |
+| `featured` | `true` | |
+| `sort` | `featured` (default) \| `newest` \| `price_asc` \| `price_desc` \| `best_selling` \| `rating` \| `discount` | |
+| `page` / `limit` | int | limit capped at 60, default 12 |
+
+Response: `{items:[…], total, page, limit, totalPages, tags:[facets]}` — each
+item carries `imageUrl` / `hoverImageUrl` (first two gallery images).
+
+### GET /v1/products/:slug
+Full public detail — `404 {code:"NOT_FOUND"}` for unknown or INACTIVE slugs.
+Includes images, `variants` (parsed `options` object), APPROVED reviews only
+(latest 20), `related` (manual relations first, then auto-fill from the same
+category / shared tags by soldCount, max 8) and `frequentlyBoughtTogether`.
+Supplier `costPrice` is deliberately not part of the public contract.
+
+### GET /v1/categories
+Active categories ordered by `sortOrder` with `productCount` (active products only).
+
+### GET /v1/settings/public
+Public-safe settings: store identity, payment methods (card always `false`),
+shipping rules, browser pixel IDs (enabled integrations only). Secrets are
+never part of the response.
+
+### POST /v1/orders/track
+`{ "orderNumber": "SN100001", "phone": "017…" }` — both required (`422`
+otherwise). The order number is case-insensitive; the phone matches on the
+last 10 digits. Wrong phone and unknown order number return the SAME
+`404` message (no enumeration). Rate limited: 20 requests / 10 min per IP →
+`429 {code:"RATE_LIMITED"}`.
+
+### GET /v1/media/:key
+R2 object stream with `Content-Type` (by extension / object metadata) and
+`Cache-Control: public, max-age=31536000, immutable`. `404` envelope when
+missing; traversal keys rejected.
+
+### Errors
+`{ "success": false, "error": "…", "code": "NOT_FOUND" | "VALIDATION_ERROR" | "RATE_LIMITED" | "INTERNAL" }`
+with the appropriate HTTP status. Stack traces never leave the server
+(structured console logs carry method/path/message instead).

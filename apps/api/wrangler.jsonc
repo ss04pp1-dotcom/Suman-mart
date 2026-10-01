@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Suman Mart / ShopNest — public REST API (Cloudflare Workers).
+  // Suggested production domain: api.example.com (see README → Deployment).
+  "name": "suman-mart-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-06-01",
+  "observability": {
+    "enabled": true
+  },
+  // Public read API — no secrets here. Secrets (future admin tokens, provider
+  // keys) go in `wrangler secret put`, never in this file.
+  "vars": {
+    "ALLOWED_ORIGINS": "*",
+    "ENVIRONMENT": "development"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "suman-mart",
+      // Replace with `wrangler d1 create suman-mart` output before deploying.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      // Replace with your bucket name (`wrangler r2 bucket create suman-mart-media`).
+      "bucket_name": "suman-mart-media"
+    }
+  ]
+}

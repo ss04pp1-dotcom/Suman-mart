@@ -1,0 +1,31 @@
+// Dedicated database for rate-limit buckets — deliberately SEPARATE from the
+// main store database (round-3 audit finding).
+//
+// Why: every API call writes one rate-limit row (tracking alone can hit
+// 120 writes/min). When those writes share the main SQLite file they compete
+// with the checkout transaction for the single database write lock, adding
+// latency to the highest-value path in the platform. A separate file gives
+// the limiter its own lock domain; a busy limiter can never stall checkout.
+//
+// The table is created lazily by src/lib/rate-limit-db.ts (CREATE TABLE IF
+// NOT EXISTS) — no migration story needed for a single counter table.
+//
+// Generate with:
+//   bunx prisma generate --schema prisma/ratelimit/schema.prisma
+// (wired into package.json: db:generate + postinstall).
+
+generator ratelimit {
+  provider = "prisma-client-js"
+  output   = "../../src/generated/ratelimit"
+}
+
+datasource ratelimit {
+  provider = "sqlite"
+  url      = env("RATELIMIT_DATABASE_URL")
+}
+
+model RateLimitEntry {
+  key          String   @id
+  count        Int      @default(0)
+  windowStart  DateTime @default(now())
+}
