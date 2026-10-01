@@ -150,6 +150,19 @@ export default function AdminOrderDetailPage({ params }: { params: Promise<{ id:
     order.paymentStatus !== "PAID" && paymentStatus === "PAID" && ["BKASH", "NAGAD"].includes(order.paymentMethod);
   const smsBlockSave = markingManualPaid && !smsVerified;
 
+  // Round-5 audit: cancelling/returning an order that still holds an UNVERIFIED
+  // (Pending) manual payment releases its TrxID for reuse on a NEW order.
+  // That is correct when no money ever arrived — but WRONG when the money DID
+  // arrive and the operator refunded it outside the system (bKash/Nagad app):
+  // the buyer could then fund a second order with the same real transfer. The
+  // safe sequence in that case is ONE save with Payment status = Paid + the
+  // SMS-match tick + the cancel — the server flips the payment to SUCCESS
+  // before the release step, so the verified TrxID stays locked forever.
+  const pendingManualClaim =
+    pendingTrxId !== null && order.paymentStatus !== "PAID" && ["BKASH", "NAGAD"].includes(order.paymentMethod);
+  const cancellingReleasesClaim =
+    pendingManualClaim && status !== order.status && ["CANCELLED", "RETURNED"].includes(status) && paymentStatus !== "PAID";
+
   return (
     <div>
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
@@ -175,6 +188,19 @@ export default function AdminOrderDetailPage({ params }: { params: Promise<{ id:
         <p className="mb-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-medium text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300">
           Confirm the SMS match in the Payment card before saving — the server rejects marking a bKash/Nagad payment as Paid without it.
         </p>
+      )}
+
+      {cancellingReleasesClaim && (
+        <div className="mb-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300">
+          <p className="font-semibold">
+            Cancelling now will release TrxID <span className="font-mono">{pendingTrxId}</span> for reuse on a new order.
+          </p>
+          <p className="mt-1">
+            That is right if no money ever arrived. But if the payment DID arrive and you refunded it outside the
+            system (bKash/Nagad app), set Payment status to <strong>Paid</strong> and tick the SMS-match confirmation
+            in the <strong>same save</strong> — the verified TrxID then stays locked even after cancellation.
+          </p>
+        </div>
       )}
 
       <div className="grid gap-4 xl:grid-cols-3">

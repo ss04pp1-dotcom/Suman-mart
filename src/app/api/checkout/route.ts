@@ -78,27 +78,25 @@ export async function POST(req: NextRequest) {
       })
     : null;
 
-  // Guest checkout: email is REQUIRED — otherwise the buyer would never
-  // receive an order confirmation (or a payment-verification receipt).
-  if (!customer && !input.customerEmail) {
-    return fail("Enter your email so we can send your order confirmation", 422, { code: "GUEST_EMAIL_REQUIRED" });
-  }
+  // Round-5 audit: the GUEST EMAIL IS OPTIONAL. This is a COD-first store and
+  // a large share of Bangladeshi buyers do not use email at all — the shipping
+  // phone is the real fulfillment channel, and demanding an email (plus an
+  // OTP) at checkout measurably hurt conversion.
+  //
+  // Spam model unchanged in strength: an address the buyer did NOT prove
+  // control of is only a risk when the platform actually SENDS mail to it.
+  //   • Guest gives NO email → no confirmation mail is ever sent → no OTP.
+  //   • Guest GIVES an email → prove control with the one-time code, but
+  //     only while a provider is configured & healthy (the only situation in
+  //     which unsolicited mail could actually be delivered — round-4 audit;
+  //     the outage relaxation is round-5).
+  //   • Signed-in customers are identified by their account email (no gate —
+  //     removed in round 3: it only blocked logged-in unverified users, and
+  //     without a mail provider it deadlocked new accounts).
   const orderEmail = customer?.email ?? input.customerEmail?.toLowerCase() ?? null;
 
-  // NOTE: there is deliberately NO email-verification gate for SIGNED-IN
-  // customers at checkout (removed in round 3: it only blocked logged-in
-  // unverified users, and without a mail provider it deadlocked new accounts).
-  //
-  // Round-4 audit: GUESTS must however prove control of the email they
-  // submit — while (and only while) a mail provider is configured. Without
-  // this check anyone could place orders with someone else's address and the
-  // platform would send that person unsolicited confirmation mail. Without a
-  // provider no mail ever leaves the server, so no proof is needed (or
-  // possible). The OTP is verified AND consumed here, before the order is
-  // created — a failed order burns the code (request a new one) so one code
-  // can never fund two orders.
-  if (!customer && guestCheckoutOtpRequired()) {
-    if (!orderEmail || !input.guestEmailOtp) {
+  if (!customer && guestCheckoutOtpRequired() && orderEmail) {
+    if (!input.guestEmailOtp) {
       return fail("Enter the 6-digit code we emailed you to confirm your email address", 422, { code: "GUEST_OTP_REQUIRED" });
     }
     const otp = await consumeGuestOtp(orderEmail, input.guestEmailOtp);

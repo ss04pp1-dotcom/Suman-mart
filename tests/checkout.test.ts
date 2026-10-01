@@ -424,3 +424,27 @@ describe("createOrder — post-commit resilience", () => {
     mocked.mockResolvedValue({ recorded: true, duplicate: false });
   });
 });
+
+describe("createOrder — guest email optional (round 5)", () => {
+  it("creates a guest order with NO email and attempts no confirmation mail", async () => {
+    const product = await seedProduct({ stock: 5 });
+    const outboxBefore = await db.mailOutbox.count();
+
+    const order = await createOrder({
+      lines: [line(product, 2)],
+      couponResult: null,
+      address: ADDRESS,
+      paymentMethod: "COD",
+      customerId: null,
+      customerEmail: null, // round-5: no email → no mail → nothing to abuse
+    });
+
+    expect(order.orderNumber).toMatch(/^SN\d+$/);
+    expect(order.customerEmail).toBeNull();
+    expect((await db.product.findUniqueOrThrow({ where: { id: product.id } })).stock).toBe(3);
+
+    // No confirmation mail was even attempted (createOrder guards the send
+    // on a present email) — the outbox is unchanged.
+    expect(await db.mailOutbox.count()).toBe(outboxBefore);
+  });
+});

@@ -156,3 +156,103 @@ describe("TrxID release on cancel/return (round 4)", () => {
     expect(payment.transactionId).toBe("R4TRXLOCK1"); // untouched
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────
+// Round-5 audit: an admin cancelling an order whose money HAD arrived (and
+// was refunded outside the system) must keep the TrxID locked. The admin
+// route applies the payment flip BEFORE the release step, so the combined
+// save { status: CANCELLED, paymentStatus: PAID, smsVerified: true } ends
+// with a verified, still-locked payment row instead of a released claim.
+// ────────────────────────────────────────────────────────────────────────
+
+describe("payment flip protects the TrxID from release (round 5)", () => {
+  it("PAID applied before the release step keeps the original TrxID locked (combined PAID + CANCELLED save)", async () => {
+    const { db } = await import("@/lib/db");
+    const { releasePendingTransactionIds } = await import("@/lib/order-flow");
+
+    const order = await db.order.create({
+      data: {
+        orderNumber: `SNR5A${Date.now()}`,
+        status: "PENDING",
+        paymentStatus: "UNPAID",
+        paymentMethod: "BKASH",
+        subtotal: 1000,
+        shippingTotal: 0,
+        codCharge: 0,
+        total: 1000,
+        customerName: "Test Buyer",
+        customerPhone: "01712345678",
+        shippingAddress: "{}",
+      },
+    });
+    await db.payment.create({
+      data: { orderId: order.id, method: "BKASH", status: "PENDING", amount: 1000, transactionId: "R5TRXKEEP1" },
+    });
+
+    // Exactly the sequence the (round-5 reordered) admin route runs for the
+    // combined save: flip the PENDING payment to SUCCESS first …
+    const flipped = await db.payment.updateMany({
+      where: { orderId: order.id, status: "PENDING" },
+      data: { status: "SUCCESS" },
+    });
+    expect(flipped.count).toBe(1);
+
+    // … then run the cancellation's release step. It must find nothing to free.
+    expect(await releasePendingTransactionIds(order.id)).toBe(0);
+
+    const payment = await db.payment.findFirstOrThrow({ where: { orderId: order.id } });
+    expect(payment.status).toBe("SUCCESS");
+    expect(payment.transactionId).toBe("R5TRXKEEP1"); // original ID, NOT renamed
+
+    // Consequence: the buyer cannot fund a SECOND order with the same real
+    // transfer — the unique index rejects the claim.
+    const order2 = await db.order.create({
+      data: {
+        orderNumber: `SNR5B${Date.now()}`,
+        status: "PENDING",
+        paymentStatus: "UNPAID",
+        paymentMethod: "BKASH",
+        subtotal: 500,
+        shippingTotal: 0,
+        codCharge: 0,
+        total: 500,
+        customerName: "Test Buyer",
+        customerPhone: "01712345678",
+        shippingAddress: "{}",
+      },
+    });
+    await expect(
+      db.payment.create({
+        data: { orderId: order2.id, method: "BKASH", status: "PENDING", amount: 500, transactionId: "R5TRXKEEP1" },
+      })
+    ).rejects.toThrow();
+  });
+
+  it("a REFUNDED (post-verification) row is never released either — the historical reference stays locked", async () => {
+    const { db } = await import("@/lib/db");
+    const { releasePendingTransactionIds } = await import("@/lib/order-flow");
+
+    const order = await db.order.create({
+      data: {
+        orderNumber: `SNR5C${Date.now()}`,
+        status: "CANCELLED",
+        paymentStatus: "REFUNDED",
+        paymentMethod: "BKASH",
+        subtotal: 1000,
+        shippingTotal: 0,
+        codCharge: 0,
+        total: 1000,
+        customerName: "Test Buyer",
+        customerPhone: "01712345678",
+        shippingAddress: "{}",
+      },
+    });
+    await db.payment.create({
+      data: { orderId: order.id, method: "BKASH", status: "REFUNDED", amount: 1000, transactionId: "R5TRXRFND1" },
+    });
+
+    expect(await releasePendingTransactionIds(order.id)).toBe(0);
+    const payment = await db.payment.findFirstOrThrow({ where: { orderId: order.id } });
+    expect(payment.transactionId).toBe("R5TRXRFND1");
+  });
+});

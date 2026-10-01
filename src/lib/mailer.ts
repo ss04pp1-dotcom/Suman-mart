@@ -24,6 +24,75 @@ export interface MailMessage {
   skipRedaction?: boolean;
 }
 
+// ── Provider health tracking (round-5 audit) ─────────────
+// The guest-OTP gate used to key off “a provider is CONFIGURED”, so a Resend
+// outage blocked every guest order carrying an email — codes were issued but
+// never delivered, and the only way out was hand-editing
+// REQUIRE_GUEST_EMAIL_OTP=0. Delivery outcomes are now tracked here: after
+// MAIL_OUTAGE_THRESHOLD consecutive failed deliveries the provider is treated
+// as DOWN for MAIL_OUTAGE_COOLDOWN_MS and the OTP gate relaxes AUTOMATICALLY
+// (during an outage no mail can leave the server, so the anti-spam property
+// holds by construction — nothing can be delivered to an address its owner
+// does not control). The first attempt after the cooldown re-probes the
+// provider; one further failure re-trips the breaker. In-memory only: on the
+// single-node SQLite deployment this targets, each process trips
+// independently (documented in README → Scaling).
+
+export const MAIL_OUTAGE_THRESHOLD = 3; // consecutive failures → outage
+export const MAIL_OUTAGE_COOLDOWN_MS = 10 * 60_000; // then re-probe
+
+interface ProviderHealth {
+  consecutiveFailures: number;
+  lastFailureAt: number; // 0 = never failed
+  lastSuccessAt: number;
+}
+
+// globalThis so Next.js dev HMR and the test runner share one view.
+const globalForHealth = globalThis as unknown as { snMailerHealth?: ProviderHealth };
+const health = (globalForHealth.snMailerHealth ??= {
+  consecutiveFailures: 0,
+  lastFailureAt: 0,
+  lastSuccessAt: 0,
+});
+
+/**
+ * True when the mail provider is configured AND not in a detected outage.
+ * Callers gate “can we currently deliver mail” on this (guest OTP policy —
+ * src/lib/email-gate.ts). No provider configured → false by definition.
+ */
+export function mailProviderHealthy(): boolean {
+  if (!process.env.RESEND_API_KEY) return false;
+  if (health.consecutiveFailures < MAIL_OUTAGE_THRESHOLD) return true;
+  // Outage in effect until the cooldown passes since the LAST failure;
+  // then exactly one probe attempt is allowed through.
+  return Date.now() - health.lastFailureAt >= MAIL_OUTAGE_COOLDOWN_MS;
+}
+
+/** Record a delivery outcome. Success resets the breaker; failure trips it. */
+export function recordMailOutcome(delivered: boolean): void {
+  if (delivered) {
+    health.consecutiveFailures = 0;
+    health.lastSuccessAt = Date.now();
+  } else {
+    health.consecutiveFailures += 1;
+    health.lastFailureAt = Date.now();
+  }
+}
+
+/** Test hook: reset breaker state between test cases. */
+export function __resetMailHealthForTests(): void {
+  health.consecutiveFailures = 0;
+  health.lastFailureAt = 0;
+  health.lastSuccessAt = 0;
+}
+
+/** Test hook: force breaker state (simulating failures / time travel). */
+export function __setMailHealthForTests(state: Partial<ProviderHealth>): void {
+  if (state.consecutiveFailures !== undefined) health.consecutiveFailures = state.consecutiveFailures;
+  if (state.lastFailureAt !== undefined) health.lastFailureAt = state.lastFailureAt;
+  if (state.lastSuccessAt !== undefined) health.lastSuccessAt = state.lastSuccessAt;
+}
+
 /** Mask one-time token query params in a mail body before storing it. */
 export function redactMailBody(body: string): string {
   // token=… / t=… / code=… style params carrying ≥16 chars of entropy
@@ -81,11 +150,13 @@ ${message.body}`);
         .create({ data: { toEmail: message.to, subject: message.subject, body: storedBody, status: "FAILED", provider: "resend", error } })
         .catch(() => undefined);
       console.error("[mailer] send failed:", error);
+      recordMailOutcome(false); // round-5: feed the outage breaker
       return { delivered: false };
     }
     await db.mailOutbox
       .create({ data: { toEmail: message.to, subject: message.subject, body: storedBody, status: "SENT", provider: "resend", sentAt: new Date() } })
       .catch(() => undefined);
+    recordMailOutcome(true); // round-5: a success clears any outage
     return { delivered: true };
   } catch (e) {
     const error = e instanceof Error ? e.message : "network error";
@@ -93,6 +164,7 @@ ${message.body}`);
       .create({ data: { toEmail: message.to, subject: message.subject, body: storedBody, status: "FAILED", provider: "resend", error } })
       .catch(() => undefined);
     console.error("[mailer] send failed:", error);
+    recordMailOutcome(false); // round-5: feed the outage breaker (network path)
     return { delivered: false };
   }
 }

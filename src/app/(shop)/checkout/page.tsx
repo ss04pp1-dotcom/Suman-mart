@@ -125,9 +125,17 @@ function CheckoutInner() {
 
   // Round-4 audit: guests verify their email with a one-time code while a
   // mail provider is configured (the checkout API enforces the same policy).
-  const guestOtpRequired = !user && Boolean(settings?.guestEmailVerification);
+  // Round-5 audit: the email itself is OPTIONAL (COD-first store; many buyers
+  // have no email) — the OTP step only applies to a guest who DID enter an
+  // email. `otpWaived` is set when the server reports the gate is no longer
+  // required (e.g. the provider-outage breaker relaxed it mid-session).
+  const [otpWaived, setOtpWaived] = useState(false);
+  const guestOtpRequired = !user && Boolean(settings?.guestEmailVerification) && !otpWaived;
   const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(guestEmail.trim());
   const otpValid = /^\d{6}$/.test(guestOtp.trim());
+  // OTP inputs are shown only for a guest who entered a (valid) email —
+  // no email → no mail → nothing to verify.
+  const showOtpStep = guestOtpRequired && emailValid;
 
   useEffect(() => {
     if (otpCooldown <= 0) return;
@@ -145,7 +153,26 @@ function CheckoutInner() {
         body: JSON.stringify({ email: guestEmail.trim() }),
       });
       const data = await res.json();
+      if (data.code === "OTP_NOT_REQUIRED") {
+        // Round-5: the gate relaxed server-side (outage breaker / operator
+        // toggle) — stop asking for a code on this page.
+        setOtpWaived(true);
+        toast.info("Email verification is no longer needed", {
+          description: "You can place your order without a code — with or without an email.",
+        });
+        return;
+      }
       if (data.success) {
+        if (data.data?.sent === false) {
+          // Round-5: the provider just failed — the code was issued but no
+          // mail left the server. Say so instead of sending the buyer hunting
+          // for a code that never arrived.
+          toast.warning("Could not send the code right now", {
+            description: "You can retry in a minute, or clear the email field and continue without a confirmation email.",
+            duration: 8000,
+          });
+          return;
+        }
         setOtpSent(true);
         setOtpCooldown(60);
         toast.success("Verification code sent", { description: "Check your inbox (and spam folder) — it expires in 10 minutes." });
@@ -165,11 +192,12 @@ function CheckoutInner() {
       /^01[3-9]\d{8}$/.test(address.phone.trim()) &&
       address.line1.trim().length >= 4 &&
       address.city.trim().length >= 2 &&
-      // Guests must leave an email — order confirmation + payment receipt
-      (user !== null || emailValid) &&
-      // …and prove it with the one-time code when the policy is active
-      (!guestOtpRequired || otpValid),
-    [address, user, emailValid, guestOtpRequired, otpValid]
+      // Round-5: the guest email is OPTIONAL — no email means no confirmation
+      // mail, which is fine for a COD-first store (the phone is the channel).
+      // An OTP is only demanded from a guest who actually entered an email
+      // (and only while the policy is active).
+      (!showOtpStep || otpValid),
+    [address, showOtpStep, otpValid]
   );
 
   const isManualPayment = paymentMethod === "BKASH" || paymentMethod === "NAGAD";
@@ -206,8 +234,8 @@ function CheckoutInner() {
             postalCode: address.postalCode.trim() || null,
           },
           customerNote: customerNote.trim() || null,
-          customerEmail: !user ? guestEmail.trim() : undefined,
-          guestEmailOtp: !user && guestOtpRequired ? guestOtp.trim() : undefined,
+          customerEmail: !user ? (emailValid ? guestEmail.trim().toLowerCase() : null) : undefined,
+          guestEmailOtp: !user && showOtpStep ? guestOtp.trim() : undefined,
           paymentTrxId: isManualPayment ? trxId.trim() : undefined,
           paymentMethod,
         }),
@@ -318,7 +346,7 @@ function CheckoutInner() {
                 </div>
                 {!user && (
                   <div className="sm:col-span-2">
-                    <Label htmlFor="guestEmail">Email (for order confirmation) *</Label>
+                    <Label htmlFor="guestEmail">Email (optional — for your order confirmation)</Label>
                     <div className="flex gap-2">
                       <Input
                         id="guestEmail"
@@ -330,10 +358,10 @@ function CheckoutInner() {
                           setOtpSent(false);
                           setGuestOtp("");
                         }}
-                        placeholder="you@example.com"
+                        placeholder="you@example.com — leave empty if you don’t use email"
                         className="min-w-0 flex-1"
                       />
-                      {guestOtpRequired && (
+                      {showOtpStep && (
                         <Button
                           type="button"
                           variant="outline"
@@ -346,10 +374,15 @@ function CheckoutInner() {
                         </Button>
                       )}
                     </div>
+                    {/* Round-5: optional field with an honest explanation. If
+                        the buyer typed something that isn’t a valid address,
+                        tell them — it is silently dropped otherwise. */}
                     <p className="mt-1 text-xs text-muted-foreground">
-                      We send your order confirmation and payment receipt here
+                      {guestEmail.trim() && !emailValid
+                        ? "That doesn’t look like an email — fix it, or leave it empty to continue without a confirmation mail."
+                        : "Optional. If you give an email we’ll send your order confirmation and payment receipt there — we’ll call your mobile for delivery either way."}
                     </p>
-                    {guestOtpRequired && (
+                    {showOtpStep && (
                       <div className="mt-3">
                         <Label htmlFor="guestOtp">Email verification code *</Label>
                         <Input
@@ -497,6 +530,11 @@ function CheckoutInner() {
                     <p className="text-sm text-muted-foreground">
                       {address.line1}{address.area && `, ${address.area}`}, {address.city}{address.postalCode && ` - ${address.postalCode}`}
                     </p>
+                    {!user && (
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {emailValid ? guestEmail.trim() : "No email — delivery updates via phone only"}
+                      </p>
+                    )}
                   </div>
                   <Button variant="ghost" size="sm" onClick={() => setStep(1)}>Edit</Button>
                 </div>

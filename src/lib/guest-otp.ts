@@ -118,11 +118,18 @@ export async function consumeGuestOtp(email: string, code: string): Promise<OtpR
     orderBy: { createdAt: "desc" },
   });
   if (!live) return { ok: false, reason: "EXPIRED" }; // nothing live to verify against
-  if (live.attempts >= GUEST_OTP_MAX_ATTEMPTS) return { ok: false, reason: "TOO_MANY_ATTEMPTS" };
-  await db.guestEmailOtp.update({
-    where: { id: live.id },
+
+  // Round-5 audit: the attempt increment must be ATOMIC. The old shape was
+  // read-check-write (`attempts >= MAX` guard around a separate increment):
+  // concurrent wrong entries could each observe a pre-cap value, and the
+  // guard plus the write were not one statement. This single conditional
+  // UPDATE only increments while the cap is unmet — count === 0 means the
+  // cap is (now) reached, so the response is deterministic even under races.
+  const burn = await db.guestEmailOtp.updateMany({
+    where: { id: live.id, attempts: { lt: GUEST_OTP_MAX_ATTEMPTS } },
     data: { attempts: { increment: 1 } },
   });
+  if (burn.count === 0) return { ok: false, reason: "TOO_MANY_ATTEMPTS" };
   return { ok: false, reason: "INVALID" };
 }
 

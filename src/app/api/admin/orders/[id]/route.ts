@@ -104,6 +104,112 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     },
   });
 
+  // ── Payment-status side effects run BEFORE the status-change side effects
+  // (round-5 audit). The ordering is load-bearing for one combined request:
+  //   { status: "CANCELLED", paymentStatus: "PAID", smsVerified: true }
+  // — “the money DID arrive, we refunded it outside the system (bKash/Nagad
+  // app), and we are cancelling the order”. The payment row must flip to
+  // SUCCESS FIRST, so the release step in the status block below then finds
+  // no PENDING claim to free: the verified TrxID stays locked forever. In the
+  // old order the release ran first and freed the ID a few lines before the
+  // flip — the lock was lost in exactly the case where the money had in fact
+  // arrived, letting the buyer reuse one real transfer on a second order.
+  if (input.paymentStatus && input.paymentStatus !== order.paymentStatus) {
+    // Round-3 audit: staff verification must keep the BUYER's transaction
+    // reference. Instead of creating a detached MANUAL-<timestamp> payment,
+    // flip the order's existing PENDING payment (which carries the customer's
+    // bKash/Nagad TrxID) to the verified state. A new row is only created
+    // when none exists, with a deterministic per-order ID (timestamps can
+    // collide; order numbers cannot).
+    let paymentNote = "";
+    // Round-5 audit: identity of the row that ended up verified — needed for
+    // the dedicated audit entry below.
+    let verifiedPaymentId: string | null = null;
+    let verifiedTrxId: string | null = null;
+    // Deterministic, collision-proof transaction ID for rows the admin flow
+    // creates (repeated PAID↔REFUNDED cycles append -2, -3, … — the unique
+    // index on Payment.transactionId is the hard guarantee).
+    const uniqueTrxId = async (prefix: string): Promise<string> => {
+      const taken = new Set(
+        (
+          await db.payment.findMany({
+            where: { transactionId: { startsWith: prefix } },
+            select: { transactionId: true },
+          })
+        )
+          .map((p) => p.transactionId)
+          .filter((t): t is string => Boolean(t))
+      );
+      let candidate = prefix;
+      let n = 2;
+      while (taken.has(candidate)) candidate = `${prefix}-${n++}`;
+      return candidate;
+    };
+    if (input.paymentStatus === "PAID") {
+      const pending = await db.payment.findFirst({
+        where: { orderId: order.id, status: "PENDING" },
+        orderBy: { createdAt: "desc" },
+      });
+      if (pending) {
+        await db.payment.update({ where: { id: pending.id }, data: { status: "SUCCESS" } });
+        paymentNote = pending.transactionId ? `TrxID ${pending.transactionId} verified` : "Payment marked received";
+        verifiedPaymentId = pending.id;
+        verifiedTrxId = pending.transactionId;
+      } else {
+        const created = await db.payment.create({
+          data: {
+            orderId: order.id,
+            method: order.paymentMethod,
+            status: "SUCCESS",
+            amount: order.total,
+            transactionId: await uniqueTrxId(`${order.paymentMethod}-${order.orderNumber}`),
+          },
+        });
+        paymentNote = "Payment marked received";
+        verifiedPaymentId = created.id;
+        verifiedTrxId = created.transactionId;
+      }
+      // Round-5 audit: smsVerified is a boolean that arrives from the client —
+      // the audit trail must record WHO ticked the SMS-match confirmation,
+      // for WHICH payment (TrxID + amount + method), and WHEN. The generic
+      // order.updated entry only lists field NAMES, which is not enough to
+      // answer “who verified this money?” months later.
+      if (isManualPayment) {
+        await writeAudit(guard.admin.id, "payment.sms_verified", "payment", verifiedPaymentId, {
+          orderNumber: order.orderNumber,
+          method: order.paymentMethod,
+          amount: order.total,
+          transactionId: verifiedTrxId,
+          smsConfirmedBy: `${guard.admin.name} <${guard.admin.email}>`,
+          smsConfirmedAt: new Date().toISOString(),
+        });
+      }
+    } else if (input.paymentStatus === "REFUNDED") {
+      const success = await db.payment.findFirst({
+        where: { orderId: order.id, status: "SUCCESS" },
+        orderBy: { createdAt: "desc" },
+      });
+      if (success) {
+        await db.payment.update({ where: { id: success.id }, data: { status: "REFUNDED" } });
+        paymentNote = "Successful payment marked refunded";
+      } else {
+        await db.payment.create({
+          data: {
+            orderId: order.id,
+            method: order.paymentMethod,
+            status: "REFUNDED",
+            amount: order.total,
+            transactionId: await uniqueTrxId(`REFUND-${order.orderNumber}`),
+          },
+        });
+        paymentNote = "Refund recorded";
+      }
+    }
+    // UNPAID / COD_PENDING are order-level corrections — existing payment
+    // history rows stay untouched and no new row is invented.
+    await notify("PAYMENT", `Payment ${input.paymentStatus} for ${order.orderNumber}`, paymentNote || `Updated by ${guard.admin.name}.`, `/admin/orders/${order.id}`);
+  }
+
   if (input.status && input.status !== order.status) {
     await db.orderStatusHistory.create({
       data: {
@@ -144,78 +250,6 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
       mail.to = order.customerEmail;
       void sendMail(mail);
     }
-  }
-  if (input.paymentStatus && input.paymentStatus !== order.paymentStatus) {
-    // Round-3 audit: staff verification must keep the BUYER's transaction
-    // reference. Instead of creating a detached MANUAL-<timestamp> payment,
-    // flip the order's existing PENDING payment (which carries the customer's
-    // bKash/Nagad TrxID) to the verified state. A new row is only created
-    // when none exists, with a deterministic per-order ID (timestamps can
-    // collide; order numbers cannot).
-    let paymentNote = "";
-    // Deterministic, collision-proof transaction ID for rows the admin flow
-    // creates (repeated PAID↔REFUNDED cycles append -2, -3, … — the unique
-    // index on Payment.transactionId is the hard guarantee).
-    const uniqueTrxId = async (prefix: string): Promise<string> => {
-      const taken = new Set(
-        (
-          await db.payment.findMany({
-            where: { transactionId: { startsWith: prefix } },
-            select: { transactionId: true },
-          })
-        )
-          .map((p) => p.transactionId)
-          .filter((t): t is string => Boolean(t))
-      );
-      let candidate = prefix;
-      let n = 2;
-      while (taken.has(candidate)) candidate = `${prefix}-${n++}`;
-      return candidate;
-    };
-    if (input.paymentStatus === "PAID") {
-      const pending = await db.payment.findFirst({
-        where: { orderId: order.id, status: "PENDING" },
-        orderBy: { createdAt: "desc" },
-      });
-      if (pending) {
-        await db.payment.update({ where: { id: pending.id }, data: { status: "SUCCESS" } });
-        paymentNote = pending.transactionId ? `TrxID ${pending.transactionId} verified` : "Payment marked received";
-      } else {
-        await db.payment.create({
-          data: {
-            orderId: order.id,
-            method: order.paymentMethod,
-            status: "SUCCESS",
-            amount: order.total,
-            transactionId: await uniqueTrxId(`${order.paymentMethod}-${order.orderNumber}`),
-          },
-        });
-        paymentNote = "Payment marked received";
-      }
-    } else if (input.paymentStatus === "REFUNDED") {
-      const success = await db.payment.findFirst({
-        where: { orderId: order.id, status: "SUCCESS" },
-        orderBy: { createdAt: "desc" },
-      });
-      if (success) {
-        await db.payment.update({ where: { id: success.id }, data: { status: "REFUNDED" } });
-        paymentNote = "Successful payment marked refunded";
-      } else {
-        await db.payment.create({
-          data: {
-            orderId: order.id,
-            method: order.paymentMethod,
-            status: "REFUNDED",
-            amount: order.total,
-            transactionId: await uniqueTrxId(`REFUND-${order.orderNumber}`),
-          },
-        });
-        paymentNote = "Refund recorded";
-      }
-    }
-    // UNPAID / COD_PENDING are order-level corrections — existing payment
-    // history rows stay untouched and no new row is invented.
-    await notify("PAYMENT", `Payment ${input.paymentStatus} for ${order.orderNumber}`, paymentNote || `Updated by ${guard.admin.name}.`, `/admin/orders/${order.id}`);
   }
 
   await writeAudit(guard.admin.id, "order.updated", "order", order.id, { fields: Object.keys(input) });
