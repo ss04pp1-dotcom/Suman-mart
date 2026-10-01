@@ -5,7 +5,8 @@
  */
 import { mkdirSync, writeFileSync, existsSync } from "fs";
 
-const BASE = "/home/z/my-project/public";
+// Download target: this app's public/ directory (monorepo layout).
+const BASE = new URL("..", import.meta.url).pathname.replace(/\/$/, "") + "/public";
 const PRODUCTS: Record<string, string[]> = {
   "wireless-earbuds": ["1590658268037-6bf12165a8df", "1505740420928-5e560c06d30e", "1484704849700-f032a568e944"],
   "smart-watch": ["1546868871-7041f2a55e12", "1523275335684-37898b6baf30", "1544117519-31a4b719223d"],

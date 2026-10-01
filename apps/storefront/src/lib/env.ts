@@ -2,8 +2,14 @@ import { z } from "zod";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Environment validation — runs once at server bootstrap (src/instrumentation.ts).
-// Fails fast on missing/weak secrets in production instead of breaking at
-// the first login attempt deep inside a request.
+// Fails fast on missing/weak secrets in production instead of breaking at the
+// first request.
+//
+// Phase-9 note: the storefront is a pure UI + proxy tier. ALL business logic,
+// database access, rate limiting and mail delivery live in the Workers API
+// (apps/api). This app only needs the session secret (edge middleware
+// pre-verifies customer JWTs — the API re-verifies every request against the
+// database) and the proxy target.
 // ─────────────────────────────────────────────────────────────────────────
 
 const FORBIDDEN_SECRETS = new Set([
@@ -19,9 +25,7 @@ function isWeakSecret(value: string): boolean {
 }
 
 const envSchema = z.object({
-  DATABASE_URL: z.string().min(1, "DATABASE_URL is required (e.g. file:./db/custom.db)"),
   SESSION_SECRET: z.string().min(1, "SESSION_SECRET is required — generate with: openssl rand -hex 32"),
-  ADMIN_SESSION_SECRET: z.string().min(1, "ADMIN_SESSION_SECRET is required — generate with: openssl rand -hex 32"),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
 });
 
@@ -45,51 +49,27 @@ export function checkEnv(): EnvCheckResult {
     for (const issue of parsed.error.issues) {
       (isProduction && !isBuildPhase ? errors : warnings).push(`${issue.path.join(".")}: ${issue.message}`);
     }
-  } else {
-    const { SESSION_SECRET, ADMIN_SESSION_SECRET } = parsed.data;
-    if (isWeakSecret(SESSION_SECRET)) {
-      const msg = "SESSION_SECRET is weak (use `openssl rand -hex 32`) — sessions can be forged";
-      (isProduction && !isBuildPhase ? errors : warnings).push(msg);
-    }
-    if (isWeakSecret(ADMIN_SESSION_SECRET)) {
-      const msg = "ADMIN_SESSION_SECRET is weak (use `openssl rand -hex 32`) — admin sessions can be forged";
-      (isProduction && !isBuildPhase ? errors : warnings).push(msg);
-    }
-  }
-
-  // Round-4 audit: 2FA secret encryption MUST use a dedicated key in
-  // production. Without it the key is derived from ADMIN_SESSION_SECRET, so
-  // rotating that secret silently breaks every admin's 2FA (exactly the
-  // coupling round 3 introduced the key to remove). Warn in dev, REFUSE TO
-  // BOOT in production — a crash loop with a clear message beats a
-  // locked-out admin fleet after the next secret rotation.
-  if (process.env.TOTP_ENC_KEY && process.env.TOTP_ENC_KEY.length < 32) {
-    const msg = "TOTP_ENC_KEY is set but shorter than 32 chars — generate one with `openssl rand -hex 32`";
-    (isProduction && !isBuildPhase ? errors : warnings).push(msg);
-  } else if (!process.env.TOTP_ENC_KEY) {
-    const msg =
-      "TOTP_ENC_KEY is not set — 2FA secrets would be encrypted with a key derived from ADMIN_SESSION_SECRET, so rotating that secret breaks every admin's 2FA. Generate a dedicated key: openssl rand -hex 32";
+  } else if (isWeakSecret(parsed.data.SESSION_SECRET)) {
+    const msg = "SESSION_SECRET is weak (use `openssl rand -hex 32`) — sessions can be forged";
     (isProduction && !isBuildPhase ? errors : warnings).push(msg);
   }
 
-  // Round-4 audit: with direct (no-proxy) exposure a client can forge a
-  // single-entry x-forwarded-for and rotate fresh rate-limit buckets
-  // (verified empirically — see README → Client IP & proxy configuration).
-  // Nudge operators onto a proxy at boot.
-  if (isProduction && !isBuildPhase && !process.env.TRUST_PROXY) {
+  // The proxy target. Same value is read at request time by
+  // lib/backend-proxy.ts — a wrong origin means every /api/* call 502s.
+  const backend = process.env.BACKEND_ORIGIN;
+  if (isProduction && !isBuildPhase && (!backend || /^https?:\/\/(localhost|127\.)/.test(backend))) {
     warnings.push(
-      "TRUST_PROXY is not set (direct exposure) — clients can forge x-forwarded-for and rotate rate-limit buckets. Put the server behind Cloudflare/nginx and set TRUST_PROXY=cf or TRUST_PROXY=1 (see README → Client IP & proxy configuration)"
+      `BACKEND_ORIGIN is ${backend ?? "unset (defaults to http://localhost:8787)"} — in production it must point at the deployed Workers API (e.g. https://api.your-domain.com)`
     );
   }
 
-  // Advisory (round 3): SITE_URL semantics. NEXT_PUBLIC_* is inlined at BUILD
-  // time — a runtime-only value is invisible to built server code.
+  // SESSION_SECRET must be the SAME value the Workers API runs with: the
+  // edge middleware only pre-verifies the JWT locally; the API re-verifies
+  // every request server-side, so a mismatch surfaces as a login loop.
   if (isProduction && !isBuildPhase) {
-    const site = process.env.SITE_URL || process.env.NEXT_PUBLIC_SITE_URL || "";
+    const site = process.env.NEXT_PUBLIC_SITE_URL || "";
     if (!site) {
-      warnings.push("Neither SITE_URL nor NEXT_PUBLIC_SITE_URL is set — emailed links (reset, verification, order tracking) will point at localhost");
-    } else if (/^https?:\/\/localhost/i.test(site.replace(/\/+$/, ""))) {
-      warnings.push(`Site URL is localhost (${site}) in production — emailed links will be unusable outside the server`);
+      warnings.push("NEXT_PUBLIC_SITE_URL is not set — robots.txt and sitemap.xml will use a placeholder origin");
     }
   }
 

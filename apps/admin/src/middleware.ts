@@ -19,7 +19,6 @@ import { verifyJWT } from "@/lib/jwt";
 // ─────────────────────────────────────────────────────────────────────────
 
 const ADMIN_COOKIE = "sn_admin";
-const CUSTOMER_COOKIE = "sn_session";
 
 function cspHeader(nonce: string): string {
   const isDev = process.env.NODE_ENV !== "production";
@@ -43,21 +42,13 @@ export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   // ── Route guards ──────────────────────────────────────────────
+  // Admin pages (the /account customer guard lives in the storefront app —
+  // this deployment has no customer-facing routes).
   if (pathname.startsWith("/admin") && pathname !== "/admin/login") {
     const token = req.cookies.get(ADMIN_COOKIE)?.value;
     const payload = token ? await verifyJWT(token, process.env.ADMIN_SESSION_SECRET!) : null;
     if (!payload || payload.typ !== "admin") {
       const url = new URL("/admin/login", req.url);
-      url.searchParams.set("next", pathname);
-      return NextResponse.redirect(url);
-    }
-  }
-
-  if (pathname.startsWith("/account")) {
-    const token = req.cookies.get(CUSTOMER_COOKIE)?.value;
-    const payload = token ? await verifyJWT(token, process.env.SESSION_SECRET!) : null;
-    if (!payload || payload.typ !== "customer") {
-      const url = new URL("/login", req.url);
       url.searchParams.set("next", pathname);
       return NextResponse.redirect(url);
     }

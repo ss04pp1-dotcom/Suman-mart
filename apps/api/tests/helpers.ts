@@ -10,6 +10,31 @@ import { SEED_SQL } from "./seed";
 
 const g = globalThis as unknown as { __apiTestsReady?: Promise<void> };
 
+/**
+ * The runtime env object the app's lib code ACTUALLY reads (src/lib/config.ts
+ * → runtimeEnv() → globalThis.__snApiEnv, populated by bridgeEnv from the
+ * worker bindings).
+ *
+ * Writes to bare `process.env` in a TEST FILE are not visible to the libs
+ * under test (the Vite `define` rewrite only covers SSR-transformed app
+ * modules, not test files) — unit tests that manipulate policy/encryption
+ * env vars MUST write through this accessor instead. If the bridge has not
+ * run yet in this worker, the object is seeded from workerd's process.env so
+ * the test starts from the same values the bindings would provide.
+ *
+ * NOTE: a subsequent HTTP request through the worker re-runs bridgeEnv and
+ * re-populates this object from the bindings — env-sensitive unit tests must
+ * not mix SELF.fetch calls with env mutation.
+ */
+export function testEnv(): Record<string, string | undefined> {
+  const gEnv = globalThis as unknown as {
+    __snApiEnv?: Record<string, string | undefined>;
+    process?: { env?: Record<string, string | undefined> };
+  };
+  if (!gEnv.__snApiEnv) gEnv.__snApiEnv = { ...(gEnv.process?.env ?? {}) };
+  return gEnv.__snApiEnv;
+}
+
 /** Splits a SQL script into statements on `;` line endings, stripping comment lines. */
 function splitStatements(sql: string): string[] {
   return sql

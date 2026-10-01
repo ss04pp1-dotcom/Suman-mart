@@ -82,3 +82,46 @@ export async function proxyMediaToBackend(prefix: string, path: string[]): Promi
   }
   return new Response(res.body, { status: res.status, headers: outHeaders });
 }
+
+// ── Server-component data access ────────────────────────────────────
+
+/** The /v1/admin/auth/me payload (functions are dropped by JSON — fields only). */
+export interface AdminMe {
+  admin: {
+    id: string;
+    name: string;
+    email: string;
+    role: string;
+    roleLabel: string;
+    avatarUrl: string | null;
+    mustChangePassword: boolean;
+    totpEnabled: boolean;
+    recoveryCodesRemaining: number;
+    permissions: string[];
+    permissionOverrides: string[] | null;
+  } | null;
+}
+
+/**
+ * Server-side (RSC) GET against the Workers API with the incoming request's
+ * cookies — the only server component that still needs backend data is the
+ * admin shell layout (session introspection); every console page fetches
+ * through the /api/admin proxy client-side.
+ */
+export async function apiGet<T>(path: string, cookieHeader?: string | null): Promise<T | null> {
+  try {
+    const res = await fetch(`${BACKEND_ORIGIN}/v1${path}`, {
+      headers: {
+        ...(cookieHeader ? { cookie: cookieHeader } : {}),
+        "x-forwarded-host": "server-component",
+      },
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { success: boolean; data: T };
+    return body.success ? body.data : null;
+  } catch (e) {
+    console.error(`[admin-api] GET ${path} failed:`, e);
+    return null;
+  }
+}

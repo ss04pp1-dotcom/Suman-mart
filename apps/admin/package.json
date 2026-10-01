@@ -7,13 +7,10 @@
     "typecheck": "tsc --noEmit",
     "build": "rm -rf .next && next build && cp -r .next/static .next/standalone/apps/admin/.next/ && cp -r public .next/standalone/apps/admin/",
     "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
-    "lint": "eslint .",
-    "postinstall": "prisma generate && prisma generate --schema prisma/ratelimit/schema.prisma",
-    "db:generate": "prisma generate && prisma generate --schema prisma/ratelimit/schema.prisma"
+    "lint": "eslint ."
   },
   "dependencies": {
     "@hookform/resolvers": "^5.1.1",
-    "@prisma/client": "^6.11.1",
     "@radix-ui/react-accordion": "^1.2.11",
     "@radix-ui/react-alert-dialog": "^1.1.14",
     "@radix-ui/react-aspect-ratio": "^1.1.7",
@@ -53,7 +50,6 @@
     "lucide-react": "^0.525.0",
     "next": "^16.1.1",
     "next-themes": "^0.4.6",
-    "prisma": "^6.11.1",
     "react": "^19.0.0",
     "react-day-picker": "^9.8.0",
     "react-dom": "^19.0.0",

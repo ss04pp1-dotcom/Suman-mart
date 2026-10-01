@@ -2,7 +2,7 @@
   "name": "suman-mart",
   "version": "1.0.0",
   "private": true,
-  "description": "Suman Mart / ShopNest — e-commerce + dropshipping platform. Monorepo: apps/storefront (customer Next.js app), apps/admin (admin Next.js app), apps/api (Cloudflare Workers API), packages/* (shared contracts).",
+  "description": "Suman Mart / ShopNest \u2014 e-commerce + dropshipping platform. Monorepo: apps/storefront (customer Next.js app), apps/admin (admin Next.js app), apps/api (Cloudflare Workers API), packages/* (shared contracts).",
   "workspaces": [
     "apps/*",
     "packages/*"
@@ -10,19 +10,19 @@
   "scripts": {
     "dev": "cd apps/storefront && exec bun next dev -p 3000 2>&1 | tee ../../dev.log",
     "dev:admin": "cd apps/admin && exec bun next dev -p 3001 2>&1 | tee ../../admin-dev.log",
+    "dev:api": "bun run --cwd apps/api dev",
     "build": "bun run --cwd apps/storefront build && bun run --cwd apps/admin build",
     "build:storefront": "bun run --cwd apps/storefront build",
     "build:admin": "bun run --cwd apps/admin build",
     "lint": "bun run --cwd apps/storefront lint && bun run --cwd apps/admin lint",
-    "test": "bun run --cwd apps/storefront test",
+    "test": "bun run --cwd apps/api test && bun run --cwd apps/storefront test",
     "test:api": "bun run --cwd apps/api test",
-    "typecheck": "bun run --cwd apps/storefront typecheck && bun run --cwd apps/admin typecheck",
-    "db:push": "bun run --cwd apps/storefront db:push",
-    "db:generate": "bun run --cwd apps/storefront db:generate && bun run --cwd apps/admin db:generate",
-    "db:migrate": "bun run --cwd apps/storefront db:migrate",
-    "db:deploy": "bun run --cwd apps/storefront db:deploy",
-    "db:reset": "bun run --cwd apps/storefront db:reset",
-    "db:seed": "bun run --cwd apps/storefront db:seed"
+    "test:storefront": "bun run --cwd apps/storefront test",
+    "typecheck": "bun run --cwd apps/storefront typecheck && bun run --cwd apps/admin typecheck && bun run --cwd apps/api typecheck",
+    "db:generate": "bun run --cwd apps/api db:generate",
+    "db:migrate:local": "bun run --cwd apps/api migrations:local",
+    "db:migrate:remote": "bun run --cwd apps/api migrations:remote",
+    "db:seed:local": "node apps/api/scripts/dev-seed.mjs"
   },
   "devDependencies": {
     "bun-types": "^1.3.4"

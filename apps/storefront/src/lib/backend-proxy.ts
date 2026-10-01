@@ -71,7 +71,6 @@ export async function proxyToBackend(req: NextRequest, prefix: string, path: str
  * (/v1/media/uploads/…).
  */
 export async function proxyMedia(req: NextRequest, prefix: string, path: string[]): Promise<Response> {
-  const incoming = new URL(req.url);
   const suffix = path.map((segment) => encodeURIComponent(segment)).join("/");
   const target = `${BACKEND_ORIGIN}/v1/media/${prefix.replace(/^\//, "")}/${suffix}`;
 

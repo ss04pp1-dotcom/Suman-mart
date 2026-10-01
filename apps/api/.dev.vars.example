@@ -1,0 +1,33 @@
+# Local development secrets for `wrangler dev` (copy to .dev.vars — never
+# commit real values). Production uses `wrangler secret put <NAME>` instead.
+#
+# Bindings (DB, MEDIA, ALLOWED_ORIGINS, ENVIRONMENT) come from
+# wrangler.jsonc — only secrets live here.
+
+# Customer session JWT + tracking HMAC signing key (openssl rand -hex 32).
+# MUST match the storefront's SESSION_SECRET (its edge middleware
+# pre-verifies customer JWTs with the same key).
+SESSION_SECRET=
+
+# Admin session JWT signing key + TOTP v1 fallback key (openssl rand -hex 32).
+# MUST match the admin app's ADMIN_SESSION_SECRET.
+ADMIN_SESSION_SECRET=
+
+# Dedicated encryption key for admin TOTP secrets at rest (openssl rand -hex
+# 32). Without it v1 rows fall back to an ADMIN_SESSION_SECRET-derived key.
+TOTP_ENC_KEY=
+
+# Client-IP resolution behind a proxy: "cf" (Cloudflare) or "1" (own
+# nginx/Caddy). Leave unset for direct exposure.
+TRUST_PROXY=
+
+# Optional: customer email delivery via Resend (https://resend.com).
+# RESEND_API_KEY=
+# MAIL_FROM="ShopNest <no-reply@shopnest.com>"
+
+# Optional policy switches (see src/lib/email-gate.ts for the full matrix):
+# REQUIRE_VERIFIED_EMAIL=0
+# REQUIRE_GUEST_EMAIL_OTP=0
+
+# Canonical site origin for emailed links:
+# SITE_URL=http://localhost:3000
