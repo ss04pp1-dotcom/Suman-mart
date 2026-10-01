@@ -1,13 +1,11 @@
-import { getCurrentCustomer } from "@/lib/auth";
-import { db } from "@/lib/db";
+import { apiGet, type AccountOverview } from "@/lib/backend-proxy";
+
 import { WishlistGrid } from "@/components/shop/wishlist-grid";
 
 export default async function AccountWishlistPage() {
-  const customer = await getCurrentCustomer();
-  if (!customer) return null;
-  // Count of past orders referenced for the "reorder" hint
-  const orderCount = await db.order.count({ where: { customerId: customer.id } });
-  void orderCount;
+  const data = await apiGet<AccountOverview>("/storefront/account/overview");
+  if (!data) return null; // sign-in required (client components handle the rest)
+  const customer = data.customer;
 
   return (
     <div className="space-y-6">

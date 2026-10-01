@@ -9,15 +9,22 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "migrations:local": "wrangler d1 migrations apply suman-mart --local",
-    "migrations:remote": "wrangler d1 migrations apply suman-mart --remote"
+    "migrations:remote": "wrangler d1 migrations apply suman-mart --remote",
+    "postinstall": "prisma generate --schema prisma/schema.prisma && node scripts/patch-prisma-client.mjs",
+    "db:generate": "prisma generate --schema prisma/schema.prisma && node scripts/patch-prisma-client.mjs"
   },
   "dependencies": {
+    "@prisma/adapter-d1": "6.16.2",
+    "@prisma/client": "6.16.2",
     "@suman-mart/shared": "workspace:*",
-    "hono": "^4.13.12"
+    "hono": "^4.13.12",
+    "zod": "^4.0.2"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.9.14",
     "@cloudflare/workers-types": "^5.20261001.1",
+    "@types/node": "^26.6.3",
+    "prisma": "6.16.2",
     "typescript": "^5",
     "vitest": "3.2.4",
     "wrangler": "^4.145.0"

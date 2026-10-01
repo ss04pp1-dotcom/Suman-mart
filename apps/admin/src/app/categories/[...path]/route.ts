@@ -1,11 +1,12 @@
 import { NextRequest } from "next/server";
-import { proxyToBackend } from "@/lib/backend-proxy";
+import { proxyMediaToBackend } from "@/lib/backend-proxy";
 
-// Media is served by the backend origin (until media migrates to R2 + the
-// Workers API — see docs/FEATURE-INVENTORY.md §8).
+// Media lives in R2 and is served by the Workers API's /v1/media route
+// (product/banner/category seed assets were migrated; uploads are stored
+// there directly — see apps/api/scripts/migrate-media-to-r2.sh).
 
 type Ctx = { params: Promise<{ path: string[] }> };
 
 export async function GET(_req: NextRequest, ctx: Ctx) {
-  return proxyToBackend(_req, "/categories", (await ctx.params).path);
+  return proxyMediaToBackend("categories", (await ctx.params).path);
 }

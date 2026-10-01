@@ -1,21 +1,24 @@
 import { NextRequest } from "next/server";
 
 // ─────────────────────────────────────────────────────────────────────────
-// Runtime proxy to the shared backend origin.
+// Runtime proxy to the shared backend (Cloudflare Workers API).
 //
 // Why a route handler instead of next.config rewrites: rewrites are evaluated
 // at BUILD time (baked into routes-manifest.json), so the destination could
 // not be changed per environment without a rebuild. This proxy reads
 // BACKEND_ORIGIN at REQUEST time — the admin deployment points at whatever
-// backend serves the API that day (storefront Node service now, the
-// Cloudflare Workers API once the admin write-paths are ported).
+// backend serves the API that day.
+//
+// Phase 9: the backend is the Cloudflare Workers API (apps/api) — same-origin
+// /api/admin/* paths map onto the versioned surface ${BACKEND_ORIGIN}/v1/*,
+// and media paths map onto the R2-backed /v1/media route.
 //
 // Cookie/authentication headers are forwarded in both directions, and the
 // original Origin + Host are passed through as x-forwarded-host so the
 // backend's same-origin CSRF check keeps working behind the proxy.
 // ─────────────────────────────────────────────────────────────────────────
 
-export const BACKEND_ORIGIN = process.env.BACKEND_ORIGIN ?? "http://localhost:3000";
+export const BACKEND_ORIGIN = process.env.BACKEND_ORIGIN ?? "http://localhost:8787";
 
 /** Headers that must reach the backend verbatim. */
 const FORWARD_REQUEST_HEADERS = ["content-type", "cookie", "origin", "x-forwarded-for", "user-agent", "accept", "accept-language"];
@@ -24,9 +27,10 @@ const FORWARD_REQUEST_HEADERS = ["content-type", "cookie", "origin", "x-forwarde
 const FORWARD_RESPONSE_HEADERS = ["content-type", "cache-control", "location", "retry-after"];
 
 export async function proxyToBackend(req: NextRequest, prefix: string, path: string[]): Promise<Response> {
+  void prefix; // same-origin prefix (e.g. "/api/admin") — the API is versioned
   const incoming = new URL(req.url);
   const suffix = path.map((segment) => encodeURIComponent(segment)).join("/");
-  const target = `${BACKEND_ORIGIN}${prefix}/${suffix}${incoming.search}`;
+  const target = `${BACKEND_ORIGIN}/v1/admin/${suffix}${incoming.search}`;
 
   const headers = new Headers();
   for (const name of FORWARD_REQUEST_HEADERS) {
@@ -60,5 +64,21 @@ export async function proxyToBackend(req: NextRequest, prefix: string, path: str
   const setCookies = typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : [];
   for (const cookie of setCookies) outHeaders.append("set-cookie", cookie);
 
+  return new Response(res.body, { status: res.status, headers: outHeaders });
+}
+
+/**
+ * Proxy a media path (/products/x.jpg, /uploads/x.png …) to the API's
+ * R2-backed media route (/v1/media/<prefix>/<path>).
+ */
+export async function proxyMediaToBackend(prefix: string, path: string[]): Promise<Response> {
+  const suffix = path.map((segment) => encodeURIComponent(segment)).join("/");
+  const target = `${BACKEND_ORIGIN}/v1/media/${prefix}/${suffix}`;
+  const res = await fetch(target, { method: "GET" });
+  const outHeaders = new Headers();
+  for (const name of ["content-type", "cache-control", "etag"]) {
+    const value = res.headers.get(name);
+    if (value) outHeaders.set(name, value);
+  }
   return new Response(res.body, { status: res.status, headers: outHeaders });
 }

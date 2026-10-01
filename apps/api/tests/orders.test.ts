@@ -65,15 +65,18 @@ describe("POST /v1/orders/track", () => {
 
 describe("rate limiting on /v1/orders/track", () => {
   it("allows 20 attempts per 10-minute window, then 429s", async () => {
-    // 6 valid attempts above + this loop's earlier ones share the bucket; the
-    // bucket key is per-IP ("unknown" in tests) — run the loop until a 429
-    // appears and assert it never exceeds the documented limit + small slack.
+    // Monolith-parity limiter (Phase-8 port): buckets are per-CLIENT-IP.
+    // A single-entry x-forwarded-for is honoured (proxy-injected), so the
+    // test simulates one real client. Unresolvable IPs share a scaled
+    // "unknown" bucket (monolith round-3 audit semantics) — far above 20,
+    // which is why the explicit IP header matters here.
+    const headers = { "Content-Type": "application/json", "x-forwarded-for": "203.0.113.50" };
     let saw429 = false;
     let okCount = 0;
     for (let i = 0; i < 25; i++) {
       const res = await SELF.fetch("http://localhost/v1/orders/track", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ orderNumber: "SN100001", phone: "01711111111" }),
       });
       if (res.status === 429) {
@@ -85,9 +88,9 @@ describe("rate limiting on /v1/orders/track", () => {
         okCount++;
       }
     }
-    // 6 earlier calls in this file + okCount here must not exceed 20 + 1 slack
+    // Fresh bucket for this IP: exactly 20 allowed, the 21st is rejected
     // (the rejected attempt is also counted — documented fixed-window policy).
-    expect(okCount).toBeLessThanOrEqual(21);
+    expect(okCount).toBe(20);
     expect(saw429).toBe(true);
   });
 });

@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { db } from "@/lib/db";
+import { apiGet, type OrderRow } from "@/lib/backend-proxy";
 import { parseJSON } from "@/lib/json";
 import { formatBDT, formatDateTime } from "@/lib/format";
 import { Button } from "@/components/ui/button";
@@ -16,11 +16,9 @@ export const metadata: Metadata = {
 export default async function OrderSuccessPage({ params }: { params: Promise<{ orderNumber: string }> }) {
   const { orderNumber } = await params;
 
-  const order = await db.order.findUnique({
-    where: { orderNumber: orderNumber.toUpperCase() },
-    include: { items: true },
-  });
-  if (!order) notFound();
+  const data = await apiGet<{ order: OrderRow }>(`/storefront/order-success/${orderNumber}`);
+  if (!data) notFound();
+  const order = data.order;
 
   const address = parseJSON<{ fullName: string; phone: string; line1: string; city: string; area?: string | null }>(
     order.shippingAddress,
@@ -53,7 +51,7 @@ export default async function OrderSuccessPage({ params }: { params: Promise<{ o
         <div className="grid gap-4 sm:grid-cols-3">
           {[
             { icon: Package, label: "Order status", value: "Pending confirmation" },
-            { icon: Truck, label: "Estimated delivery", value: order.estimatedDelivery ? `${order.estimatedDelivery.toLocaleDateString("en-GB", { day: "numeric", month: "short" })}` : "2–5 days" },
+            { icon: Truck, label: "Estimated delivery", value: order.estimatedDelivery ? `${new Date(order.estimatedDelivery).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}` : "2–5 days" },
             { icon: Banknote, label: "Payment", value: order.paymentMethod === "COD" ? "Cash on Delivery" : order.paymentMethod },
           ].map((s, i) => (
             <div key={i} className="rounded-2xl border border-border bg-card p-4">

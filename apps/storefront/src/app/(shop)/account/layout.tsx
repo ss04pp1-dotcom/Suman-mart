@@ -1,12 +1,13 @@
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { getCurrentCustomer } from "@/lib/auth";
+import { apiGet, type AccountOverview } from "@/lib/backend-proxy";
 import { AccountNav } from "@/components/shop/account-nav";
 import { Package } from "lucide-react";
 
 export default async function AccountLayout({ children }: { children: React.ReactNode }) {
-  const customer = await getCurrentCustomer();
-  if (!customer) redirect("/login?next=/account");
+  const data = await apiGet<AccountOverview>("/storefront/account/overview");
+  if (!data) redirect("/login?next=/account");
+  const customer = data.customer;
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8">

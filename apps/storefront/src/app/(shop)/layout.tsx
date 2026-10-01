@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
-import { db } from "@/lib/db";
-import { getSetting } from "@/lib/settings";
+import { apiGet } from "@/lib/backend-proxy";
+import { DEFAULT_SETTINGS } from "@/lib/settings-defaults";
 import { Header } from "@/components/shop/header";
 import { Footer } from "@/components/shop/footer";
 import { ConsentBanner } from "@/components/shop/consent-banner";
@@ -11,7 +11,8 @@ import { StoreHydration } from "@/components/shop/store-hydration";
 import { ShopQueryProvider } from "@/components/shop/query-provider";
 
 export async function generateMetadata(): Promise<Metadata> {
-  const seo = await getSetting("seo");
+  const layout = await apiGet<{ seo: typeof DEFAULT_SETTINGS.seo }>("/storefront/layout");
+  const seo = layout?.seo ?? DEFAULT_SETTINGS.seo;
   return {
     title: { default: seo.defaultTitle, template: "%s | ShopNest" },
     description: seo.defaultDescription,
@@ -20,14 +21,9 @@ export async function generateMetadata(): Promise<Metadata> {
 }
 
 export default async function ShopLayout({ children }: { children: React.ReactNode }) {
-  const [categories, general] = await Promise.all([
-    db.category.findMany({
-      where: { isActive: true },
-      orderBy: { sortOrder: "asc" },
-      select: { name: true, slug: true },
-    }),
-    getSetting("general"),
-  ]);
+  const data = await apiGet<{ categories: { name: string; slug: string }[]; general: typeof DEFAULT_SETTINGS.general }>("/storefront/layout");
+  const categories = data?.categories ?? [];
+  const general = data?.general ?? DEFAULT_SETTINGS.general;
 
   return (
     <div className="flex min-h-screen flex-col">

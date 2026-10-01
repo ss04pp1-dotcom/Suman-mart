@@ -1,15 +1,11 @@
-import { db } from "@/lib/db";
-import { getCurrentCustomer } from "@/lib/auth";
+
+import { apiGet, type AccountOverview } from "@/lib/backend-proxy";
 import { AddressManager } from "@/components/shop/address-manager";
 
 export default async function AccountAddressesPage() {
-  const customer = await getCurrentCustomer();
-  if (!customer) return null;
-
-  const addresses = await db.address.findMany({
-    where: { customerId: customer.id },
-    orderBy: [{ isDefault: "desc" }, { createdAt: "desc" }],
-  });
+  const data = await apiGet<AccountOverview>("/storefront/account/overview");
+  if (!data) return null;
+  const addresses = data.customer.addresses;
 
   return (
     <div className="space-y-6">

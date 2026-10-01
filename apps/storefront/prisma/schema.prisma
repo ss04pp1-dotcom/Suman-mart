@@ -339,6 +339,8 @@ model Order {
   codCharge     Int     @default(0)
   // Set when stock was returned after cancellation/return (idempotency guard)
   stockRestoredAt DateTime?
+  // Crypto-random token written by the winning restock claim (see apps/api src/lib/order-flow.ts)
+  stockRestoreToken String?
   total         Int
   couponCode    String?
   // JSON snapshot: { fullName, phone, line1, line2, city, area, postalCode }

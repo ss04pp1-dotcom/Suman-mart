@@ -1,22 +1,16 @@
 import Link from "next/link";
 import Image from "next/image";
-import { db } from "@/lib/db";
-import { getCurrentCustomer } from "@/lib/auth";
+
+import { apiGet, type OrderRow } from "@/lib/backend-proxy";
 import { formatBDT, formatDate } from "@/lib/format";
 import { OrderStatusBadge } from "@/components/shop/order-timeline";
 import { Button } from "@/components/ui/button";
 import { ChevronRight, Package } from "lucide-react";
 
 export default async function AccountOrdersPage() {
-  const customer = await getCurrentCustomer();
-  if (!customer) return null;
-
-  const orders = await db.order.findMany({
-    where: { customerId: customer.id },
-    orderBy: { createdAt: "desc" },
-    take: 30,
-    include: { items: true },
-  });
+  const data = await apiGet<{ orders: OrderRow[] }>("/storefront/account/orders");
+  if (!data) return null;
+  const orders = data.orders;
 
   if (orders.length === 0) {
     return (

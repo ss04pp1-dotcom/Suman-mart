@@ -1,22 +1,20 @@
-import { db } from "@/lib/db";
-import { getCurrentCustomer } from "@/lib/auth";
+
+import { apiGet, type AccountOverview } from "@/lib/backend-proxy";
 import { formatBDT, formatDate } from "@/lib/format";
 import { Package, ShoppingBag, Truck, Wallet } from "lucide-react";
 
 export default async function AccountProfilePage() {
-  const customer = await getCurrentCustomer();
-  if (!customer) return null;
-
-  const [orderCount, totalSpent, pendingCount, addressCount] = await Promise.all([
-    db.order.count({ where: { customerId: customer.id, status: { not: "CANCELLED" } } }),
-    db.order.aggregate({ where: { customerId: customer.id, status: { not: "CANCELLED" } }, _sum: { total: true } }),
-    db.order.count({ where: { customerId: customer.id, status: { in: ["PENDING", "CONFIRMED", "PROCESSING", "SHIPPED", "IN_TRANSIT", "OUT_FOR_DELIVERY"] } } }),
-    db.address.count({ where: { customerId: customer.id } }),
-  ]);
+  const data = await apiGet<AccountOverview>("/storefront/account/overview");
+  if (!data) return null;
+  const customer = data.customer;
+  const orderCount = data.stats.orderCount;
+  const totalSpent = data.stats.totalSpent;
+  const pendingCount = data.stats.activeOrders;
+  const addressCount = data.stats.addressCount;
 
   const stats = [
     { icon: ShoppingBag, label: "Total orders", value: String(orderCount) },
-    { icon: Wallet, label: "Total spent", value: formatBDT(totalSpent._sum.total ?? 0) },
+    { icon: Wallet, label: "Total spent", value: formatBDT(totalSpent) },
     { icon: Truck, label: "Active orders", value: String(pendingCount) },
     { icon: Package, label: "Saved addresses", value: String(addressCount) },
   ];

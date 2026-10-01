@@ -1,12 +1,11 @@
 import type { MetadataRoute } from "next";
-import { db } from "@/lib/db";
+import { apiGet } from "@/lib/backend-proxy";
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const base = process.env.NEXT_PUBLIC_SITE_URL ?? "https://shopnest.example.com";
-  const [products, categories] = await Promise.all([
-    db.product.findMany({ where: { isActive: true }, select: { slug: true, updatedAt: true } }),
-    db.category.findMany({ where: { isActive: true }, select: { slug: true } }),
-  ]);
+  const data = await apiGet<{ products: { slug: string; updatedAt: string }[]; categories: { slug: string }[] }>("/storefront/sitemap");
+  const products = data?.products ?? [];
+  const categories = data?.categories ?? [];
 
   return [
     { url: base, changeFrequency: "daily", priority: 1 },

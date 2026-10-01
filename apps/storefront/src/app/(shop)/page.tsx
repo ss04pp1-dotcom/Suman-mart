@@ -1,6 +1,6 @@
 import Link from "next/link";
 import Image from "next/image";
-import { db } from "@/lib/db";
+import { apiGet, type HomeBundle } from "@/lib/backend-proxy";
 import { ProductCard } from "@/components/shop/product-card";
 import { HeroCarousel } from "@/components/shop/hero-carousel";
 import { RatingStars } from "@/components/shop/product-card";
@@ -19,54 +19,17 @@ import {
 
 // Server component — data is read directly from the database
 export default async function HomePage() {
-  const now = new Date();
-  const activeBanner = { isActive: true, startsAt: { lte: now }, OR: [{ endsAt: null }, { endsAt: { gte: now } }] };
-
-  const [banners, sections, categories, featured, newArrivals, bestSellers, specialOffers, topReviews, sectionMeta] =
-    await Promise.all([
-      db.banner.findMany({
-        where: { placement: "HERO", ...activeBanner },
-        orderBy: { sortOrder: "asc" },
-      }),
-      db.homepageSection.findMany({ where: { isActive: true }, orderBy: { sortOrder: "asc" } }),
-      db.category.findMany({
-        where: { isActive: true },
-        orderBy: { sortOrder: "asc" },
-        include: { _count: { select: { products: { where: { isActive: true } } } } },
-      }),
-      db.product.findMany({
-        where: { isActive: true, isFeatured: true },
-        orderBy: { soldCount: "desc" },
-        take: 8,
-        include: { images: { orderBy: { sortOrder: "asc" }, take: 2 }, category: { select: { name: true, slug: true } } },
-      }),
-      db.product.findMany({
-        where: { isActive: true },
-        orderBy: { createdAt: "desc" },
-        take: 8,
-        include: { images: { orderBy: { sortOrder: "asc" }, take: 2 }, category: { select: { name: true, slug: true } } },
-      }),
-      db.product.findMany({
-        where: { isActive: true, stock: { gt: 0 } },
-        orderBy: { soldCount: "desc" },
-        take: 8,
-        include: { images: { orderBy: { sortOrder: "asc" }, take: 2 }, category: { select: { name: true, slug: true } } },
-      }),
-      db.product.findMany({
-        where: { isActive: true, compareAtPrice: { not: null } },
-        orderBy: { createdAt: "desc" },
-        take: 4,
-        include: { images: { orderBy: { sortOrder: "asc" }, take: 2 }, category: { select: { name: true, slug: true } } },
-      }),
-      db.review.findMany({
-        where: { status: "APPROVED", isFeatured: true, rating: { gte: 4 } },
-        orderBy: { createdAt: "desc" },
-        take: 3,
-        include: { product: { select: { name: true, slug: true } } },
-      }),
-      db.homepageSection.findMany(),
-    ]);
-  void sectionMeta;
+  const data = await apiGet<HomeBundle>("/storefront/home");
+  if (!data) {
+    // Backend unreachable — render the static shell (SEO-safe degradation)
+    return (
+      <div className="mx-auto max-w-7xl px-4 py-24 text-center">
+        <h1 className="text-2xl font-bold">Store unavailable</h1>
+        <p className="mt-2 text-sm text-muted-foreground">We could not load the store right now. Please try again in a moment.</p>
+      </div>
+    );
+  }
+  const { banners, sections, categories, featured, newArrivals, bestSellers, specialOffers, topReviews, promoBanner } = data;
 
   const toCard = (p: (typeof featured)[number]) => ({
     id: p.id,
@@ -85,11 +48,6 @@ export default async function HomePage() {
 
   const has = (key: string) => sections.some((s) => s.key === key);
   const meta = (key: string) => sections.find((s) => s.key === key);
-
-  const promoBanner = await db.banner.findFirst({
-    where: { placement: "PROMO", ...activeBanner },
-    orderBy: { sortOrder: "asc" },
-  });
 
   return (
     <div className="mx-auto max-w-7xl space-y-14 px-4 py-6 sm:py-8">

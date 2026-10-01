@@ -1,8 +1,8 @@
 import Link from "next/link";
 import Image from "next/image";
 import { notFound } from "next/navigation";
-import { db } from "@/lib/db";
-import { getCurrentCustomer } from "@/lib/auth";
+
+import { apiGet, type OrderRow } from "@/lib/backend-proxy";
 import { parseJSON } from "@/lib/json";
 import { formatBDT, formatDateTime, PAYMENT_METHOD_LABELS, PAYMENT_STATUS_LABELS } from "@/lib/format";
 import { OrderTimeline, OrderStatusBadge } from "@/components/shop/order-timeline";
@@ -11,18 +11,10 @@ import { Button } from "@/components/ui/button";
 
 export default async function AccountOrderDetailPage({ params }: { params: Promise<{ orderNumber: string }> }) {
   const { orderNumber } = await params;
-  const customer = await getCurrentCustomer();
-  if (!customer) return null;
 
-  const order = await db.order.findFirst({
-    where: { orderNumber: orderNumber.toUpperCase(), customerId: customer.id },
-    include: {
-      items: true,
-      statusHistory: { orderBy: { createdAt: "asc" } },
-      supplierOrders: { include: { supplier: { select: { name: true } } } },
-    },
-  });
-  if (!order) notFound();
+  const data = await apiGet<{ order: OrderRow }>(`/storefront/account/order/${orderNumber}`);
+  if (!data) notFound();
+  const order = { ...data.order, supplierOrders: data.order.supplierOrders ?? [], statusHistory: data.order.statusHistory ?? [] };
 
   const address = parseJSON<{ fullName: string; phone: string; line1: string; city: string; area?: string | null; postalCode?: string | null }>(
     order.shippingAddress,

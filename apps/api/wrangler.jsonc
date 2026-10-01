@@ -5,8 +5,18 @@
   "name": "suman-mart-api",
   "main": "src/index.ts",
   "compatibility_date": "2025-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // Explicit WASM module rule — lets the generated Prisma client import
+  // query_compiler_bg.wasm WITHOUT the `?module` suffix (which breaks
+  // vitest-pool-workers' module resolution; see scripts/patch-prisma-client.mjs).
+  "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm"] }],
   "observability": {
     "enabled": true
+  },
+  // Hourly background jobs: supplier price/stock sync + failed-order retry +
+  // tracking retention. (See runScheduledTasks in src/index.ts.)
+  "triggers": {
+    "crons": ["0 * * * *"]
   },
   // Public read API — no secrets here. Secrets (future admin tokens, provider
   // keys) go in `wrangler secret put`, never in this file.

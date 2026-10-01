@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { db } from "@/lib/db";
-import { getSetting } from "@/lib/settings";
+import { apiGet, type ProductDetailBundle } from "@/lib/backend-proxy";
+import { DEFAULT_SETTINGS } from "@/lib/settings-defaults";
 import { parseJSON, safeJsonLd } from "@/lib/json";
 import { formatBDT } from "@/lib/format";
 import { ProductGallery, PurchasePanel, type VariantGroup } from "@/components/shop/purchase-panel";
@@ -16,13 +16,11 @@ import { ProductDetailTracker } from "@/components/shop/detail-tracker";
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
   const { slug } = await params;
   // isActive filter — unpublished product data must never leak into metadata
-  const product = await db.product.findFirst({
-    where: { slug, isActive: true },
-    select: { name: true, seoTitle: true, seoDescription: true, shortDescription: true, images: { take: 1 } },
-  });
-  if (!product) return { title: "Product Not Found" };
-  const title = product.seoTitle ?? `${product.name} — Buy Online`;
-  const description = product.seoDescription ?? product.shortDescription ?? undefined;
+  const bundle = await apiGet<ProductDetailBundle>(`/storefront/product/${slug}`);
+  const seo = bundle?.seo;
+  if (!seo) return { title: "Product Not Found" };
+  const title = seo.seoTitle ?? `${seo.name} — Buy Online`;
+  const description = seo.seoDescription ?? seo.shortDescription ?? undefined;
   return {
     title,
     description,
@@ -31,26 +29,17 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
       title,
       description,
       type: "website",
-      images: product.images[0]?.url ? [product.images[0].url] : undefined,
+      images: seo.firstImage ? [seo.firstImage] : undefined,
     },
   };
 }
 
 export default async function ProductDetailPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const [product, shipping] = await Promise.all([
-    db.product.findFirst({
-      where: { slug, isActive: true },
-      include: {
-        category: { select: { name: true, slug: true } },
-        images: { orderBy: { sortOrder: "asc" } },
-        variants: { orderBy: { sortOrder: "asc" } },
-        tags: { select: { tag: { select: { name: true, slug: true } } } },
-        reviews: { where: { status: "APPROVED" }, orderBy: [{ isFeatured: "desc" }, { createdAt: "desc" }], take: 10 },
-      },
-    }),
-    getSetting("shipping"),
-  ]);
+  const bundle = await apiGet<ProductDetailBundle>(`/storefront/product/${slug}`);
+  if (!bundle) notFound();
+  const { product, shipping: shippingSettings, relations, fbt, autoRelated } = bundle;
+  const shipping = shippingSettings ?? DEFAULT_SETTINGS.shipping;
 
   if (!product) notFound();
 
@@ -67,27 +56,7 @@ export default async function ProductDetailPage({ params }: { params: Promise<{ 
   }
   const variantGroups = [...variantMap.values()];
 
-  // Related & FBT
-  const [relations, fbt, autoRelated] = await Promise.all([
-    db.productRelation.findMany({
-      where: { productId: product.id, type: "RELATED" },
-      orderBy: { sortOrder: "asc" },
-      include: { relatedProduct: { include: { images: { take: 1, orderBy: { sortOrder: "asc" } }, category: { select: { name: true, slug: true } } } } },
-      take: 4,
-    }),
-    db.productRelation.findMany({
-      where: { productId: product.id, type: "FBT" },
-      orderBy: { sortOrder: "asc" },
-      include: { relatedProduct: { include: { images: { take: 1, orderBy: { sortOrder: "asc" } }, category: { select: { name: true, slug: true } } } } },
-      take: 3,
-    }),
-    db.product.findMany({
-      where: { isActive: true, id: { not: product.id }, categoryId: product.categoryId },
-      orderBy: { soldCount: "desc" },
-      take: 4,
-      include: { images: { take: 1, orderBy: { sortOrder: "asc" } }, category: { select: { name: true, slug: true } } },
-    }),
-  ]);
+  // Related & FBT (fetched with the product bundle)
 
   const toCard = (p: { id: string; name: string; slug: string; price: number; compareAtPrice: number | null; rating: number; reviewCount: number; stock: number; soldCount: number; brand: string | null; images: { url: string }[]; category: { name: string; slug: string } | null }) => ({
     id: p.id,
@@ -143,8 +112,8 @@ export default async function ProductDetailPage({ params }: { params: Promise<{ 
         <span>/</span>
         <Link href="/products" className="hover:text-brand-600">Products</Link>
         <span>/</span>
-        <Link href={`/products?category=${product.category.slug}`} className="hover:text-brand-600">
-          {product.category.name}
+        <Link href={`/products?category=${product.category?.slug ?? ""}`} className="hover:text-brand-600">
+          {product.category?.name ?? "Shop"}
         </Link>
         <span>/</span>
         <span className="line-clamp-1 text-foreground">{product.name}</span>
@@ -271,7 +240,7 @@ export default async function ProductDetailPage({ params }: { params: Promise<{ 
                 comment: r.comment,
                 isFeatured: r.isFeatured,
                 verifiedPurchase: r.verifiedPurchase,
-                createdAt: r.createdAt.toISOString(),
+                createdAt: r.createdAt,
                 adminReply: r.adminReply,
               }))}
             />

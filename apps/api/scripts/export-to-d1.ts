@@ -15,6 +15,11 @@
 //   • Emits INSERT statements for every user-data table, in an order that
 //     satisfies foreign keys (parents before children), with
 //     PRAGMA defer_foreign_keys as a belt-and-braces guard.
+//   • CONVERTS DateTime columns from the Node/Prisma representation (epoch
+//     milliseconds INTEGER) to the Prisma-D1-adapter representation
+//     (ISO-8601 TEXT with +00:00) — without this, every date-range query on
+//     the Workers API silently matches nothing (INTEGER vs TEXT comparison
+//     in SQLite). Verified empirically during the Phase-8 port.
 //   • Skips Prisma-internal tables (_prisma_migrations) and the local
 //     rate-limit table (the Workers API keeps its own).
 //   • Chunks output into ~500-statement files — well inside D1's
@@ -83,11 +88,21 @@ for (const table of TABLES) {
     continue;
   }
 
-  const columns = (db.query(`PRAGMA table_info("${table}")`).all() as { name: string }[]).map((c) => c.name);
+  const tableInfo = db.query(`PRAGMA table_info("${table}")`).all() as { name: string; type: string }[];
+  const columns = tableInfo.map((c) => c.name);
+  // DateTime columns: the source DB stores epoch-millis INTEGERs (Node
+  // Prisma); the D1 adapter expects ISO-8601 TEXT — convert on export.
+  const dateColumns = new Set(tableInfo.filter((c) => c.type.toUpperCase() === "DATETIME").map((c) => c.name));
   const rows = db.query(`SELECT * FROM "${table}"`).all() as Record<string, unknown>[];
 
   for (const row of rows) {
-    const values = columns.map((c) => quote(row[c]));
+    const values = columns.map((c) => {
+      const value = row[c];
+      if (dateColumns.has(c) && typeof value === "number") {
+        return `'${new Date(value).toISOString().replace("Z", "+00:00")}'`;
+      }
+      return quote(value);
+    });
     statements.push(`INSERT INTO "${table}" (${columns.map((c) => `"${c}"`).join(", ")}) VALUES (${values.join(", ")});`);
   }
   report.push({ table, rows: rows.length });
